@@ -1,6 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { Category, Transaction, TransactionType, PeriodFilter } from '../types';
-import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from 'recharts';
+import { 
+  PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, 
+  Tooltip, CartesianGrid, Legend, Sankey, Rectangle, Layer 
+} from 'recharts';
 
 interface DashboardProps {
   transactions: Transaction[];
@@ -37,17 +40,17 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
   }, [transactions, filter]);
 
   // Only consider INCOME and EXPENSE for P&L
-  const plTransactions = filteredTransactions.filter(t => 
+  const plTransactions = useMemo(() => filteredTransactions.filter(t => 
     t.type === TransactionType.INCOME || t.type === TransactionType.EXPENSE
-  );
+  ), [filteredTransactions]);
 
-  const totalIncome = plTransactions
+  const totalIncome = useMemo(() => plTransactions
     .filter(t => t.type === TransactionType.INCOME)
-    .reduce((sum, t) => sum + t.amount, 0);
+    .reduce((sum, t) => sum + t.amount, 0), [plTransactions]);
 
-  const totalExpense = plTransactions
+  const totalExpense = useMemo(() => plTransactions
     .filter(t => t.type === TransactionType.EXPENSE)
-    .reduce((sum, t) => sum + t.amount, 0);
+    .reduce((sum, t) => sum + t.amount, 0), [plTransactions]);
 
   const netProfit = totalIncome - totalExpense;
 
@@ -87,6 +90,65 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
     }); 
   }, [plTransactions, filter]);
 
+  // Prepare data for Sankey Diagram
+  const sankeyData = useMemo(() => {
+    const incomeMap = new Map<string, number>();
+    const expenseMap = new Map<string, number>();
+
+    plTransactions.forEach(t => {
+      const catName = categories.find(c => c.id === t.categoryId)?.name || 'Uncategorized';
+      if (t.type === TransactionType.INCOME) {
+        incomeMap.set(catName, (incomeMap.get(catName) || 0) + t.amount);
+      } else if (t.type === TransactionType.EXPENSE) {
+        expenseMap.set(catName, (expenseMap.get(catName) || 0) + t.amount);
+      }
+    });
+
+    const totalInc = Array.from(incomeMap.values()).reduce((a, b) => a + b, 0);
+    const totalExp = Array.from(expenseMap.values()).reduce((a, b) => a + b, 0);
+
+    if (totalInc === 0 && totalExp === 0) return { nodes: [], links: [] };
+
+    const nodes: { name: string; color: string }[] = [];
+    const links: { source: number; target: number; value: number }[] = [];
+
+    const addNode = (name: string, color: string) => {
+      const idx = nodes.findIndex(n => n.name === name);
+      if (idx >= 0) return idx;
+      nodes.push({ name, color });
+      return nodes.length - 1;
+    };
+
+    const centerNodeIdx = addNode("Total Funds", "#64748b");
+
+    // Income Links (Left -> Center)
+    incomeMap.forEach((amount, name) => {
+      const idx = addNode(name, "#10b981"); // Success color
+      links.push({ source: idx, target: centerNodeIdx, value: amount });
+    });
+
+    // Deficit Handling (If Expense > Income, add a 'Deficit' node on left)
+    if (totalExp > totalInc) {
+      const deficit = totalExp - totalInc;
+      const idx = addNode("Deficit (Loss)", "#ef4444"); // Danger color
+      links.push({ source: idx, target: centerNodeIdx, value: deficit });
+    }
+
+    // Expense Links (Center -> Right)
+    expenseMap.forEach((amount, name) => {
+      const idx = addNode(name, "#f59e0b"); // Amber color for expenses
+      links.push({ source: centerNodeIdx, target: idx, value: amount });
+    });
+
+    // Profit Handling (If Income > Expense, add 'Profit' node on right)
+    if (totalInc > totalExp) {
+      const profit = totalInc - totalExp;
+      const idx = addNode("Net Profit", "#3b82f6"); // Blue color
+      links.push({ source: centerNodeIdx, target: idx, value: profit });
+    }
+
+    return { nodes, links };
+  }, [plTransactions, categories]);
 
   return (
     <div className="space-y-6">
@@ -179,7 +241,73 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
           </div>
         </div>
       </div>
+
+      {/* Sankey Diagram */}
+      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200 h-[500px] flex flex-col">
+        <h3 className="text-lg font-bold text-gray-900 mb-4">Cash Flow Visualization (Sankey)</h3>
+        <div className="flex-1 w-full overflow-hidden">
+           {sankeyData.nodes.length > 0 ? (
+             <ResponsiveContainer width="100%" height="100%">
+               <Sankey
+                 data={sankeyData}
+                 node={
+                   <SankeyNode 
+                     containerWidth={0} // We don't have container width easily in custom node, will use relative logic
+                   />
+                 }
+                 nodePadding={50}
+                 margin={{ left: 10, right: 10, top: 10, bottom: 10 }}
+                 link={{ stroke: '#cbd5e1' }}
+               >
+                 <Tooltip />
+               </Sankey>
+             </ResponsiveContainer>
+           ) : (
+             <div className="h-full flex items-center justify-center text-gray-400">Not enough data to generate flow</div>
+           )}
+        </div>
+      </div>
     </div>
+  );
+};
+
+// Custom Node Component for Sankey
+const SankeyNode = ({ x, y, width, height, index, payload }: any) => {
+  if (!payload || !payload.value) return null;
+
+  // Simple heuristic for text positioning based on node name type or just alternating
+  // Standard Sankey: Source (Left) -> Middle -> Target (Right)
+  // We can try to guess side based on X, but keeping it simple: Text inside if large, outside if small
+  
+  const isLeft = x < 100;
+  const isRight = x > 300; // Arbitrary breakpoint for responsive container, but visual logic:
+  // Better: Text on right for left nodes, text on left for right nodes.
+
+  return (
+    <Layer key={`CustomNode${index}`}>
+      <Rectangle x={x} y={y} width={width} height={height} fill={payload.color || "#8884d8"} fillOpacity={0.9} />
+      <text
+        textAnchor={isLeft ? 'start' : 'end'}
+        x={isLeft ? x + width + 6 : x - 6}
+        y={y + height / 2}
+        fontSize="12"
+        fontWeight="bold"
+        fill="#1e293b" 
+        dy={-6}
+      >
+        {payload.name}
+      </text>
+      <text
+        textAnchor={isLeft ? 'start' : 'end'}
+        x={isLeft ? x + width + 6 : x - 6}
+        y={y + height / 2}
+        fontSize="11"
+        fill="#64748b" 
+        dy={8}
+      >
+        {`$${payload.value.toLocaleString()}`}
+      </text>
+    </Layer>
   );
 };
 

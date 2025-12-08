@@ -1,8 +1,11 @@
 import React, { useState, useRef, useMemo } from 'react';
 import { Category, Transaction, TransactionType } from '../types';
-import { UploadIcon, MagicWandIcon, TrashIcon, PlusCircleIcon, BankIcon, ChevronDownIcon } from './Icons';
+import { UploadIcon, MagicWandIcon, TrashIcon, PlusCircleIcon, BankIcon, ChevronDownIcon, FileIcon, AlertIcon } from './Icons';
 import { autoCategorizeTransactions } from '../services/geminiService';
 import { fetchSimpleFinTransactions } from '../services/simpleFinService';
+
+// Declare XLSX global from the script tag
+declare const XLSX: any;
 
 interface TransactionManagerProps {
   transactions: Transaction[];
@@ -17,13 +20,18 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const allCsvRowsRef = useRef<string[][]>([]);
+  const allImportRowsRef = useRef<string[][]>([]);
 
-  // CSV Parsing State
-  const [csvPreview, setCsvPreview] = useState<string[][] | null>(null);
+  // Import State
+  const [importPreview, setImportPreview] = useState<string[][] | null>(null);
   const [columnMapping, setColumnMapping] = useState({ date: 0, description: 1, amount: 2 });
   const [importAccountName, setImportAccountName] = useState('My Bank Account');
   const [showMapper, setShowMapper] = useState(false);
+  
+  // Duplicate Review State
+  const [showDuplicateReview, setShowDuplicateReview] = useState(false);
+  const [importCandidates, setImportCandidates] = useState<{ clean: Transaction[], duplicates: Transaction[] }>({ clean: [], duplicates: [] });
+  const [duplicatesToKeep, setDuplicatesToKeep] = useState<Set<string>>(new Set());
 
   // Filter State
   const [filterText, setFilterText] = useState('');
@@ -81,14 +89,46 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     e.preventDefault();
     setIsDragging(false);
     if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      parseCSV(e.dataTransfer.files[0]);
+      handleFileSelect(e.dataTransfer.files[0]);
     }
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      parseCSV(e.target.files[0]);
+      handleFileSelect(e.target.files[0]);
     }
+  };
+
+  const handleFileSelect = (file: File) => {
+    const fileName = file.name.toLowerCase();
+    if (fileName.endsWith('.csv')) {
+      parseCSV(file);
+    } else if (fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
+      parseExcel(file);
+    } else {
+      alert("Please upload a .csv, .xlsx, or .xls file.");
+    }
+  };
+
+  const parseExcel = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const data = e.target?.result;
+      const workbook = XLSX.read(data, { type: 'binary' });
+      const firstSheetName = workbook.SheetNames[0];
+      const worksheet = workbook.Sheets[firstSheetName];
+      
+      // header: 1 returns array of arrays
+      const rows = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: "" }) as string[][];
+      
+      // Filter empty rows
+      const cleanRows = rows.filter(r => r.length > 0 && r.some(cell => cell !== ""));
+      
+      setImportPreview(cleanRows.slice(0, 5));
+      allImportRowsRef.current = cleanRows;
+      setShowMapper(true);
+    };
+    reader.readAsBinaryString(file);
   };
 
   const parseCSV = (file: File) => {
@@ -118,34 +158,46 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
           }
         }
         result.push(cell);
-        
         return result.map(c => c.trim());
       }).filter(r => r.length > 1);
 
-      setCsvPreview(rows.slice(0, 5));
+      setImportPreview(rows.slice(0, 5));
+      allImportRowsRef.current = rows;
       setShowMapper(true);
-      allCsvRowsRef.current = rows;
     };
     reader.readAsText(file);
   };
 
-  const handleImportConfirm = () => {
-    const rows = allCsvRowsRef.current;
-    const newTransactions: Transaction[] = rows.slice(1).map((row, index) => {
-       const dateStr = row[columnMapping.date]?.replace(/"/g, '').trim();
-       const descStr = row[columnMapping.description]?.replace(/"/g, '').trim();
-       const amountStr = row[columnMapping.amount]?.replace(/"/g, '').replace('$', '').replace(',', '').trim();
+  const handleProcessImport = () => {
+    // 1. Map Rows to Transactions
+    const rows = allImportRowsRef.current;
+    // Skip header if it looks like one (simple check: amount column is not a number)
+    // We assume the user maps correctly. If row 0 is header, typically user won't select it, 
+    // but we can just assume row 1 onwards is data usually. 
+    // Let's assume row 0 is header for preview, and we import row 1+.
+    const dataRows = rows.slice(1);
+
+    const parsedTransactions: Transaction[] = dataRows.map((row, index) => {
+       // Safe access
+       const dateRaw = row[columnMapping.date] ? String(row[columnMapping.date]).replace(/"/g, '').trim() : '';
+       const descRaw = row[columnMapping.description] ? String(row[columnMapping.description]).replace(/"/g, '').trim() : '';
+       const amountRaw = row[columnMapping.amount] ? String(row[columnMapping.amount]).replace(/"/g, '').replace('$', '').replace(',', '').trim() : '0';
        
-       const amount = parseFloat(amountStr);
-       const date = new Date(dateStr).toISOString();
+       const amount = parseFloat(amountRaw);
+       // Attempt date parse
+       let date = new Date(dateRaw).toISOString();
+       if (isNaN(new Date(date).getTime())) {
+          // Fallback or use today if invalid
+          date = new Date().toISOString();
+       }
 
        const type = amount < 0 ? TransactionType.EXPENSE : TransactionType.INCOME;
        const absAmount = Math.abs(amount);
 
        return {
-         id: `txn-${Date.now()}-${index}`,
-         date: isNaN(new Date(date).getTime()) ? new Date().toISOString() : date,
-         description: descStr || "Unknown Transaction",
+         id: `imp-${Date.now()}-${index}`,
+         date: date,
+         description: descRaw || "Unknown Transaction",
          amount: isNaN(absAmount) ? 0 : absAmount,
          type: type,
          categoryId: undefined,
@@ -154,11 +206,63 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        };
     }).filter(t => t.amount !== 0);
 
-    setTransactions(prev => [...prev, ...newTransactions]);
+    // 2. Check for Duplicates
+    checkForDuplicates(parsedTransactions);
+  };
+
+  const checkForDuplicates = (newTxns: Transaction[]) => {
+    // Define duplicate criteria: Same Date (YYYY-MM-DD), Same Amount, Same Description (normalized)
+    const existingSignatures = new Set(transactions.map(t => {
+       const datePart = t.date.split('T')[0];
+       const descPart = t.description.toLowerCase().trim();
+       return `${datePart}|${t.amount.toFixed(2)}|${descPart}`;
+    }));
+
+    const clean: Transaction[] = [];
+    const duplicates: Transaction[] = [];
+
+    newTxns.forEach(t => {
+      const datePart = t.date.split('T')[0];
+      const descPart = t.description.toLowerCase().trim();
+      const sig = `${datePart}|${t.amount.toFixed(2)}|${descPart}`;
+
+      if (existingSignatures.has(sig)) {
+        duplicates.push(t);
+      } else {
+        clean.push(t);
+      }
+    });
+
+    if (duplicates.length > 0) {
+      setImportCandidates({ clean, duplicates });
+      setDuplicatesToKeep(new Set());
+      setShowMapper(false);
+      setShowDuplicateReview(true);
+    } else {
+      // No duplicates, just add
+      setTransactions(prev => [...prev, ...clean]);
+      closeImportFlow();
+    }
+  };
+
+  const closeImportFlow = () => {
     setShowMapper(false);
-    setCsvPreview(null);
-    allCsvRowsRef.current = [];
+    setShowDuplicateReview(false);
+    setImportPreview(null);
+    allImportRowsRef.current = [];
     if (fileInputRef.current) fileInputRef.current.value = '';
+    setImportCandidates({ clean: [], duplicates: [] });
+  };
+
+  const handleFinalizeImport = () => {
+    const toAdd = [...importCandidates.clean];
+    importCandidates.duplicates.forEach(d => {
+      if (duplicatesToKeep.has(d.id)) {
+        toAdd.push(d);
+      }
+    });
+    setTransactions(prev => [...prev, ...toAdd]);
+    closeImportFlow();
   };
 
   const handleAutoCategorize = async () => {
@@ -188,6 +292,13 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
       const newSelected = new Set(selectedIds);
       newSelected.delete(id);
       setSelectedIds(newSelected);
+    }
+  };
+
+  const handleBulkDelete = () => {
+    if (window.confirm(`Are you sure you want to delete ${selectedIds.size} transactions?`)) {
+      setTransactions(prev => prev.filter(t => !selectedIds.has(t.id)));
+      setSelectedIds(new Set());
     }
   };
 
@@ -330,7 +441,11 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     setSimpleFinError('');
     try {
       const newTransactions = await fetchSimpleFinTransactions(simpleFinUrl);
-      setTransactions(prev => [...prev, ...newTransactions]);
+      // Run duplicate check on SimpleFin data too?
+      // For now, let's just add, but robustly we should probably run the same check.
+      // Let's run it through the check mechanism:
+      checkForDuplicates(newTransactions);
+      
       setShowSimpleFinModal(false);
       setSimpleFinUrl('');
     } catch (err: any) {
@@ -381,11 +496,11 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
           onDrop={handleDrop}
         >
           <UploadIcon className="h-8 w-8 text-gray-400 mb-2" />
-          <h3 className="text-sm font-medium text-gray-900">Upload CSV</h3>
+          <h3 className="text-sm font-medium text-gray-900">Upload CSV or Excel</h3>
           <p className="text-xs text-gray-500 mb-2">Drag & drop or click</p>
           <input 
             type="file" 
-            accept=".csv" 
+            accept=".csv, .xlsx, .xls" 
             ref={fileInputRef} 
             className="hidden" 
             onChange={handleFileChange} 
@@ -394,7 +509,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
             onClick={() => fileInputRef.current?.click()}
             className="px-3 py-1 bg-white border border-gray-300 rounded text-xs font-medium text-gray-700 hover:bg-gray-50"
           >
-            Browse
+            Browse Files
           </button>
         </div>
 
@@ -420,75 +535,159 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
         </div>
       </div>
 
-      {/* CSV Mapper Modal (Inline) */}
-      {showMapper && csvPreview && (
-        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
-          <h3 className="text-lg font-bold mb-4">Map CSV Columns</h3>
-          <div className="overflow-x-auto mb-4">
+      {/* Import Mapper Modal */}
+      {showMapper && importPreview && (
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 animate-fade-in">
+          <div className="flex items-center gap-2 mb-4">
+            <FileIcon className="w-6 h-6 text-accent" />
+            <h3 className="text-lg font-bold">Map Columns</h3>
+          </div>
+          <p className="text-sm text-gray-600 mb-4">Please match the columns from your file to the application fields.</p>
+          
+          <div className="overflow-x-auto mb-6 border rounded-lg">
              <table className="min-w-full text-xs text-left text-gray-500">
                <thead className="bg-gray-50 text-gray-700 uppercase">
                  <tr>
-                   {csvPreview[0].map((_, i) => (
-                     <th key={i} className="px-2 py-1 border">Col {i}</th>
+                   {importPreview[0].map((_, i) => (
+                     <th key={i} className="px-2 py-2 border-b font-semibold bg-gray-100">Column {i}</th>
                    ))}
                  </tr>
                </thead>
                <tbody>
-                 {csvPreview.slice(0, 3).map((row, i) => (
-                   <tr key={i} className="border-b">
+                 {importPreview.slice(0, 3).map((row, i) => (
+                   <tr key={i} className="border-b last:border-0 hover:bg-gray-50">
                      {row.map((cell, j) => (
-                       <td key={j} className="px-2 py-1 border truncate max-w-[100px]">{cell}</td>
+                       <td key={j} className="px-2 py-2 border-r last:border-0 truncate max-w-[150px]">{cell}</td>
                      ))}
                    </tr>
                  ))}
                </tbody>
              </table>
           </div>
-          <div className="grid grid-cols-4 gap-4 mb-4">
+
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6 bg-gray-50 p-4 rounded-lg">
             <div>
-              <label className="block text-sm font-medium text-gray-700">Date Column</label>
+              <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Date</label>
               <select 
-                className="mt-1 block w-full text-sm border-gray-300 rounded-md"
+                className="block w-full text-sm border-gray-300 rounded-md focus:ring-accent focus:border-accent"
                 value={columnMapping.date}
                 onChange={(e) => setColumnMapping({...columnMapping, date: parseInt(e.target.value)})}
               >
-                {csvPreview[0].map((_, i) => <option key={i} value={i}>Column {i}</option>)}
+                {importPreview[0].map((_, i) => <option key={i} value={i}>Column {i}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700">Description Column</label>
+              <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Description</label>
               <select 
-                className="mt-1 block w-full text-sm border-gray-300 rounded-md"
+                className="block w-full text-sm border-gray-300 rounded-md focus:ring-accent focus:border-accent"
                 value={columnMapping.description}
                 onChange={(e) => setColumnMapping({...columnMapping, description: parseInt(e.target.value)})}
               >
-                {csvPreview[0].map((_, i) => <option key={i} value={i}>Column {i}</option>)}
+                {importPreview[0].map((_, i) => <option key={i} value={i}>Column {i}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700">Amount Column</label>
+              <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Amount</label>
               <select 
-                className="mt-1 block w-full text-sm border-gray-300 rounded-md"
+                className="block w-full text-sm border-gray-300 rounded-md focus:ring-accent focus:border-accent"
                 value={columnMapping.amount}
                 onChange={(e) => setColumnMapping({...columnMapping, amount: parseInt(e.target.value)})}
               >
-                {csvPreview[0].map((_, i) => <option key={i} value={i}>Column {i}</option>)}
+                {importPreview[0].map((_, i) => <option key={i} value={i}>Column {i}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700">Account Name</label>
+              <label className="block text-xs font-bold text-gray-700 uppercase mb-1">Account Name</label>
               <input 
                 type="text"
-                className="mt-1 block w-full text-sm border-gray-300 rounded-md"
+                className="block w-full text-sm border-gray-300 rounded-md focus:ring-accent focus:border-accent"
                 value={importAccountName}
                 onChange={(e) => setImportAccountName(e.target.value)}
                 placeholder="e.g. Chase Visa"
               />
             </div>
           </div>
-          <div className="flex justify-end gap-2">
-            <button onClick={() => setShowMapper(false)} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 rounded">Cancel</button>
-            <button onClick={handleImportConfirm} className="px-4 py-2 text-sm bg-accent text-white rounded hover:bg-blue-600">Import Transactions</button>
+          <div className="flex justify-end gap-3">
+            <button onClick={closeImportFlow} className="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-lg transition-colors">Cancel</button>
+            <button onClick={handleProcessImport} className="px-4 py-2 text-sm font-medium bg-accent text-white rounded-lg hover:bg-blue-600 transition-colors shadow-sm">Next: Review</button>
+          </div>
+        </div>
+      )}
+
+      {/* Duplicate Review Modal */}
+      {showDuplicateReview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col animate-fade-in">
+            <div className="p-4 border-b bg-gray-50 flex justify-between items-center rounded-t-xl">
+              <div className="flex items-center gap-2">
+                <AlertIcon className="w-6 h-6 text-orange-500" />
+                <h3 className="font-bold text-gray-900">Import Review</h3>
+              </div>
+              <button onClick={closeImportFlow} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">&times;</button>
+            </div>
+            
+            <div className="p-6 overflow-y-auto flex-1">
+              <div className="mb-6">
+                <p className="text-gray-700">
+                  Ready to import <strong className="text-success">{importCandidates.clean.length} new</strong> transactions.
+                </p>
+                {importCandidates.duplicates.length > 0 && (
+                  <p className="text-gray-700 mt-2">
+                    Found <strong className="text-orange-500">{importCandidates.duplicates.length} potential duplicates</strong>. 
+                    Review them below to decide if they should be added.
+                  </p>
+                )}
+              </div>
+
+              {importCandidates.duplicates.length > 0 && (
+                <div className="border rounded-lg overflow-hidden">
+                  <table className="min-w-full divide-y divide-gray-200">
+                    <thead className="bg-gray-100">
+                      <tr>
+                        <th className="px-4 py-2 text-left text-xs font-bold text-gray-500 uppercase">Import?</th>
+                        <th className="px-4 py-2 text-left text-xs font-bold text-gray-500 uppercase">Date</th>
+                        <th className="px-4 py-2 text-left text-xs font-bold text-gray-500 uppercase">Description</th>
+                        <th className="px-4 py-2 text-right text-xs font-bold text-gray-500 uppercase">Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {importCandidates.duplicates.map((t) => (
+                        <tr key={t.id} className={duplicatesToKeep.has(t.id) ? 'bg-blue-50' : ''}>
+                          <td className="px-4 py-2">
+                            <input 
+                              type="checkbox"
+                              checked={duplicatesToKeep.has(t.id)}
+                              onChange={(e) => {
+                                const newSet = new Set(duplicatesToKeep);
+                                if (e.target.checked) newSet.add(t.id);
+                                else newSet.delete(t.id);
+                                setDuplicatesToKeep(newSet);
+                              }}
+                              className="rounded text-accent focus:ring-accent"
+                            />
+                          </td>
+                          <td className="px-4 py-2 text-xs text-gray-600">{t.date.split('T')[0]}</td>
+                          <td className="px-4 py-2 text-xs text-gray-800">{t.description}</td>
+                          <td className="px-4 py-2 text-xs text-gray-800 text-right">{t.amount.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t bg-gray-50 rounded-b-xl flex justify-between items-center">
+              <div className="text-sm text-gray-500">
+                Total to add: <b>{importCandidates.clean.length + duplicatesToKeep.size}</b>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={closeImportFlow} className="px-4 py-2 text-sm text-gray-700 hover:bg-gray-200 rounded">Discard All</button>
+                <button onClick={handleFinalizeImport} className="px-6 py-2 text-sm bg-success text-white font-medium rounded hover:bg-emerald-600 shadow-sm">
+                  Confirm Import
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -680,7 +879,13 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
               onClick={handleBulkUpdate}
               className="px-4 py-1.5 bg-success hover:bg-emerald-600 rounded text-sm font-medium transition-colors"
             >
-              Apply to All
+              Apply
+            </button>
+            <button 
+              onClick={handleBulkDelete}
+              className="px-4 py-1.5 bg-danger hover:bg-red-600 rounded text-sm font-medium transition-colors"
+            >
+              Delete
             </button>
             <button 
               onClick={() => setSelectedIds(new Set())}
