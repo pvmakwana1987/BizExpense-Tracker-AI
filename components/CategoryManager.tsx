@@ -1,15 +1,31 @@
 import React, { useState } from 'react';
 import { Category, SubCategory, TransactionType } from '../types';
-import { PlusIcon, TrashIcon } from './Icons';
+import { PlusIcon, TrashIcon, CheckIcon } from './Icons';
 
 interface CategoryManagerProps {
   categories: Category[];
   setCategories: React.Dispatch<React.SetStateAction<Category[]>>;
 }
 
+const COLORS = [
+  '#ef4444', // Red
+  '#f97316', // Orange
+  '#f59e0b', // Amber
+  '#84cc16', // Lime
+  '#10b981', // Emerald
+  '#06b6d4', // Cyan
+  '#3b82f6', // Blue
+  '#6366f1', // Indigo
+  '#8b5cf6', // Violet
+  '#d946ef', // Fuchsia
+  '#f43f5e', // Rose
+  '#64748b', // Slate
+];
+
 const CategoryManager: React.FC<CategoryManagerProps> = ({ categories, setCategories }) => {
   const [newCatName, setNewCatName] = useState('');
   const [newCatType, setNewCatType] = useState<TransactionType>(TransactionType.EXPENSE);
+  const [newCatColor, setNewCatColor] = useState<string>(COLORS[6]); // Default blue
   const [newSubName, setNewSubName] = useState<{[key: string]: string}>({});
 
   const handleAddCategory = (e: React.FormEvent) => {
@@ -19,10 +35,13 @@ const CategoryManager: React.FC<CategoryManagerProps> = ({ categories, setCatego
       id: `cat-${Date.now()}`,
       name: newCatName,
       type: newCatType,
-      subcategories: []
+      subcategories: [],
+      color: newCatColor
     };
     setCategories([...categories, newCategory]);
     setNewCatName('');
+    // Pick a random next color for variety
+    setNewCatColor(COLORS[Math.floor(Math.random() * COLORS.length)]);
   };
 
   const handleDeleteCategory = (id: string) => {
@@ -86,32 +105,53 @@ const CategoryManager: React.FC<CategoryManagerProps> = ({ categories, setCatego
       {/* Create Category */}
       <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
         <h3 className="text-lg font-bold mb-4">Add New Category</h3>
-        <form onSubmit={handleAddCategory} className="flex flex-col md:flex-row gap-4 items-end">
-          <div className="flex-1 w-full">
-            <label className="block text-sm font-medium text-gray-700">Category Name</label>
-            <input 
-              type="text" 
-              value={newCatName} 
-              onChange={e => setNewCatName(e.target.value)}
-              className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-accent focus:border-accent sm:text-sm"
-              placeholder="e.g. Office Supplies"
-            />
+        <form onSubmit={handleAddCategory} className="space-y-4">
+          <div className="flex flex-col md:flex-row gap-4">
+            <div className="flex-1">
+              <label className="block text-sm font-medium text-gray-700">Category Name</label>
+              <input 
+                type="text" 
+                value={newCatName} 
+                onChange={e => setNewCatName(e.target.value)}
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-accent focus:border-accent sm:text-sm"
+                placeholder="e.g. Office Supplies"
+              />
+            </div>
+            <div className="w-full md:w-48">
+              <label className="block text-sm font-medium text-gray-700">Type</label>
+              <select 
+                value={newCatType}
+                onChange={e => setNewCatType(e.target.value as TransactionType)}
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-accent focus:border-accent sm:text-sm"
+              >
+                <option value={TransactionType.EXPENSE}>Expense</option>
+                <option value={TransactionType.INCOME}>Income</option>
+                <option value={TransactionType.TRANSFER}>Transfer</option>
+                <option value={TransactionType.LOAN}>Loan/Debt</option>
+              </select>
+            </div>
           </div>
-          <div className="w-full md:w-48">
-            <label className="block text-sm font-medium text-gray-700">Type</label>
-            <select 
-              value={newCatType}
-              onChange={e => setNewCatType(e.target.value as TransactionType)}
-              className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-accent focus:border-accent sm:text-sm"
-            >
-              <option value={TransactionType.EXPENSE}>Expense</option>
-              <option value={TransactionType.INCOME}>Income</option>
-              <option value={TransactionType.TRANSFER}>Transfer</option>
-              <option value={TransactionType.LOAN}>Loan/Debt</option>
-            </select>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">Category Color</label>
+            <div className="flex gap-2 flex-wrap">
+              {COLORS.map(c => (
+                <button
+                  type="button"
+                  key={c}
+                  onClick={() => setNewCatColor(c)}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center transition-all ${newCatColor === c ? 'ring-2 ring-offset-2 ring-gray-400 scale-110' : 'hover:scale-110'}`}
+                  style={{ backgroundColor: c }}
+                  title={c}
+                >
+                  {newCatColor === c && <CheckIcon className="w-4 h-4 text-white drop-shadow-md" />}
+                </button>
+              ))}
+            </div>
           </div>
-          <button type="submit" className="w-full md:w-auto bg-primary text-white px-4 py-2 rounded-md hover:bg-slate-800 transition-colors flex items-center justify-center gap-2">
-            <PlusIcon className="w-4 h-4" /> Add
+
+          <button type="submit" className="w-full md:w-auto bg-primary text-white px-6 py-2 rounded-md hover:bg-slate-800 transition-colors flex items-center justify-center gap-2">
+            <PlusIcon className="w-4 h-4" /> Add Category
           </button>
         </form>
       </div>
@@ -128,15 +168,23 @@ const CategoryManager: React.FC<CategoryManagerProps> = ({ categories, setCatego
 
 const CategoryCard = ({ category, onDeleteCat, onAddSub, onDeleteSub, subNameValue, setSubNameValue }: any) => {
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm hover:shadow-md transition-shadow">
-      <div className="flex justify-between items-center mb-3">
-        <h4 className="font-semibold text-gray-800">{category.name}</h4>
+    <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm hover:shadow-md transition-shadow relative overflow-hidden">
+      {/* Color Stripe */}
+      <div 
+        className="absolute left-0 top-0 bottom-0 w-1.5" 
+        style={{ backgroundColor: category.color || '#cbd5e1' }}
+      ></div>
+
+      <div className="flex justify-between items-center mb-3 pl-3">
+        <h4 className="font-semibold text-gray-800 flex items-center gap-2">
+           {category.name}
+        </h4>
         <button onClick={() => onDeleteCat(category.id)} className="text-gray-400 hover:text-danger">
           <TrashIcon className="w-4 h-4" />
         </button>
       </div>
       
-      <div className="space-y-2 mb-3">
+      <div className="space-y-2 mb-3 pl-3">
         {category.subcategories.length === 0 && <p className="text-xs text-gray-400 italic">No subcategories</p>}
         {category.subcategories.map((sub: any) => (
           <div key={sub.id} className="flex justify-between items-center text-sm bg-gray-50 px-2 py-1 rounded">
@@ -148,7 +196,7 @@ const CategoryCard = ({ category, onDeleteCat, onAddSub, onDeleteSub, subNameVal
         ))}
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex gap-2 pl-3">
         <input 
           type="text" 
           placeholder="Add subcategory..." 

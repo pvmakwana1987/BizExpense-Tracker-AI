@@ -2,24 +2,25 @@ import React, { useState, useEffect } from 'react';
 import Dashboard from './components/Dashboard';
 import TransactionManager from './components/TransactionManager';
 import CategoryManager from './components/CategoryManager';
-import { ChartIcon, ListIcon, SettingsIcon } from './components/Icons';
-import { Category, Transaction, TransactionType } from './types';
+import Insights from './components/Insights';
+import { ChartIcon, ListIcon, SettingsIcon, ChatIcon } from './components/Icons';
+import { Category, Transaction, TransactionType, AutoCategoryRule } from './types';
 
 // Default Data
 const DEFAULT_CATEGORIES: Category[] = [
-  { id: '1', name: 'Sales', type: TransactionType.INCOME, subcategories: [{ id: '1-1', name: 'Product' }, { id: '1-2', name: 'Service' }] },
-  { id: '2', name: 'Rent', type: TransactionType.EXPENSE, subcategories: [] },
-  { id: '3', name: 'Utilities', type: TransactionType.EXPENSE, subcategories: [{ id: '3-1', name: 'Internet' }, { id: '3-2', name: 'Electricity' }] },
-  { id: '4', name: 'Office Supplies', type: TransactionType.EXPENSE, subcategories: [] },
-  { id: '5', name: 'Payroll', type: TransactionType.EXPENSE, subcategories: [] },
-  { id: '6', name: 'Travel', type: TransactionType.EXPENSE, subcategories: [{ id: '6-1', name: 'Hotel' }, { id: '6-2', name: 'Flight' }, { id: '6-3', name: 'Meals' }] },
-  { id: '7', name: 'Credit Card Payment', type: TransactionType.TRANSFER, subcategories: [] },
-  { id: '8', name: 'Savings Transfer', type: TransactionType.TRANSFER, subcategories: [] },
-  { id: '9', name: 'Business Loan', type: TransactionType.LOAN, subcategories: [] },
+  { id: '1', name: 'Sales', type: TransactionType.INCOME, subcategories: [{ id: '1-1', name: 'Product' }, { id: '1-2', name: 'Service' }], color: '#10b981' },
+  { id: '2', name: 'Rent', type: TransactionType.EXPENSE, subcategories: [], color: '#ef4444' },
+  { id: '3', name: 'Utilities', type: TransactionType.EXPENSE, subcategories: [{ id: '3-1', name: 'Internet' }, { id: '3-2', name: 'Electricity' }], color: '#f59e0b' },
+  { id: '4', name: 'Office Supplies', type: TransactionType.EXPENSE, subcategories: [], color: '#6366f1' },
+  { id: '5', name: 'Payroll', type: TransactionType.EXPENSE, subcategories: [], color: '#8b5cf6' },
+  { id: '6', name: 'Travel', type: TransactionType.EXPENSE, subcategories: [{ id: '6-1', name: 'Hotel' }, { id: '6-2', name: 'Flight' }, { id: '6-3', name: 'Meals' }], color: '#ec4899' },
+  { id: '7', name: 'Credit Card Payment', type: TransactionType.TRANSFER, subcategories: [], color: '#94a3b8' },
+  { id: '8', name: 'Savings Transfer', type: TransactionType.TRANSFER, subcategories: [], color: '#64748b' },
+  { id: '9', name: 'Business Loan', type: TransactionType.LOAN, subcategories: [], color: '#0f172a' },
 ];
 
 const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'transactions' | 'settings'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'transactions' | 'settings' | 'insights'>('dashboard');
   
   // Persist State
   const [categories, setCategories] = useState<Category[]>(() => {
@@ -32,6 +33,11 @@ const App: React.FC = () => {
     return saved ? JSON.parse(saved) : [];
   });
 
+  const [rules, setRules] = useState<AutoCategoryRule[]>(() => {
+    const saved = localStorage.getItem('biztrack_rules');
+    return saved ? JSON.parse(saved) : [];
+  });
+
   useEffect(() => {
     localStorage.setItem('biztrack_categories', JSON.stringify(categories));
   }, [categories]);
@@ -39,6 +45,10 @@ const App: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('biztrack_transactions', JSON.stringify(transactions));
   }, [transactions]);
+
+  useEffect(() => {
+    localStorage.setItem('biztrack_rules', JSON.stringify(rules));
+  }, [rules]);
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-gray-50">
@@ -55,32 +65,17 @@ const App: React.FC = () => {
         </div>
 
         <nav className="flex-1 p-4 space-y-2">
-          <button
-            onClick={() => setActiveTab('dashboard')}
-            className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'dashboard' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'
-            }`}
-          >
-            <ChartIcon className="w-5 h-5" />
-            Dashboard
+          <button onClick={() => setActiveTab('dashboard')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'dashboard' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+            <ChartIcon className="w-5 h-5" /> Dashboard
           </button>
-          <button
-            onClick={() => setActiveTab('transactions')}
-            className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'transactions' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'
-            }`}
-          >
-            <ListIcon className="w-5 h-5" />
-            Transactions
+          <button onClick={() => setActiveTab('transactions')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'transactions' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+            <ListIcon className="w-5 h-5" /> Transactions
           </button>
-          <button
-            onClick={() => setActiveTab('settings')}
-            className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${
-              activeTab === 'settings' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'
-            }`}
-          >
-            <SettingsIcon className="w-5 h-5" />
-            Categories
+          <button onClick={() => setActiveTab('insights')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'insights' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+            <ChatIcon className="w-5 h-5" /> AI Insights
+          </button>
+          <button onClick={() => setActiveTab('settings')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'settings' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+            <SettingsIcon className="w-5 h-5" /> Categories
           </button>
         </nav>
 
@@ -111,8 +106,21 @@ const App: React.FC = () => {
               <TransactionManager 
                 transactions={transactions} 
                 setTransactions={setTransactions} 
-                categories={categories} 
+                categories={categories}
+                setCategories={setCategories}
+                rules={rules}
+                setRules={setRules}
               />
+            </div>
+          )}
+
+          {activeTab === 'insights' && (
+            <div className="animate-fade-in">
+              <header className="mb-8">
+                <h2 className="text-2xl font-bold text-gray-900">AI Financial Assistant</h2>
+                <p className="text-gray-500">Ask questions about your finances, tax deductions, and trends.</p>
+              </header>
+              <Insights transactions={transactions} />
             </div>
           )}
 

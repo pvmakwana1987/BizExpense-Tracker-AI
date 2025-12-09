@@ -10,7 +10,7 @@ interface DashboardProps {
   categories: Category[];
 }
 
-const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6'];
+const DEFAULT_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6'];
 
 const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
   const [filter, setFilter] = useState<PeriodFilter>('MONTH');
@@ -56,14 +56,27 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
 
   // Prepare data for Pie Chart (Expense by Category)
   const expenseByCategory = useMemo(() => {
-    const data: {[key: string]: number} = {};
+    const data: Record<string, number> = {};
+    const catIdMap: Record<string, string> = {}; // Name -> ID for color lookup
+
     plTransactions
       .filter(t => t.type === TransactionType.EXPENSE)
       .forEach(t => {
-        const catName = categories.find(c => c.id === t.categoryId)?.name || 'Uncategorized';
+        const cat = categories.find(c => c.id === t.categoryId);
+        const catName = cat?.name || 'Uncategorized';
         data[catName] = (data[catName] || 0) + t.amount;
+        if (cat) catIdMap[catName] = cat.id;
       });
-    return Object.entries(data).map(([name, value]) => ({ name, value }));
+    
+    return Object.entries(data).map(([name, value]) => {
+        const catId = catIdMap[name];
+        const category = categories.find(c => c.id === catId);
+        return { 
+            name, 
+            value,
+            color: category?.color
+        };
+    });
   }, [plTransactions, categories]);
 
   // Prepare data for Bar Chart (Income vs Expense Over Time)
@@ -94,9 +107,15 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
   const sankeyData = useMemo(() => {
     const incomeMap = new Map<string, number>();
     const expenseMap = new Map<string, number>();
+    const nodeColors = new Map<string, string>();
 
     plTransactions.forEach(t => {
-      const catName = categories.find(c => c.id === t.categoryId)?.name || 'Uncategorized';
+      const cat = categories.find(c => c.id === t.categoryId);
+      const catName = cat?.name || 'Uncategorized';
+      const catColor = cat?.color;
+
+      if (catColor) nodeColors.set(catName, catColor);
+
       if (t.type === TransactionType.INCOME) {
         incomeMap.set(catName, (incomeMap.get(catName) || 0) + t.amount);
       } else if (t.type === TransactionType.EXPENSE) {
@@ -112,10 +131,10 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
     const nodes: { name: string; color: string }[] = [];
     const links: { source: number; target: number; value: number }[] = [];
 
-    const addNode = (name: string, color: string) => {
+    const addNode = (name: string, defaultColor: string) => {
       const idx = nodes.findIndex(n => n.name === name);
       if (idx >= 0) return idx;
-      nodes.push({ name, color });
+      nodes.push({ name, color: nodeColors.get(name) || defaultColor });
       return nodes.length - 1;
     };
 
@@ -123,27 +142,27 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
 
     // Income Links (Left -> Center)
     incomeMap.forEach((amount, name) => {
-      const idx = addNode(name, "#10b981"); // Success color
+      const idx = addNode(name, "#10b981"); // Default green if no custom color
       links.push({ source: idx, target: centerNodeIdx, value: amount });
     });
 
-    // Deficit Handling (If Expense > Income, add a 'Deficit' node on left)
+    // Deficit Handling
     if (totalExp > totalInc) {
       const deficit = totalExp - totalInc;
-      const idx = addNode("Deficit (Loss)", "#ef4444"); // Danger color
+      const idx = addNode("Deficit (Loss)", "#ef4444");
       links.push({ source: idx, target: centerNodeIdx, value: deficit });
     }
 
     // Expense Links (Center -> Right)
     expenseMap.forEach((amount, name) => {
-      const idx = addNode(name, "#f59e0b"); // Amber color for expenses
+      const idx = addNode(name, "#f59e0b"); // Default amber if no custom color
       links.push({ source: centerNodeIdx, target: idx, value: amount });
     });
 
-    // Profit Handling (If Income > Expense, add 'Profit' node on right)
+    // Profit Handling
     if (totalInc > totalExp) {
       const profit = totalInc - totalExp;
-      const idx = addNode("Net Profit", "#3b82f6"); // Blue color
+      const idx = addNode("Net Profit", "#3b82f6");
       links.push({ source: centerNodeIdx, target: idx, value: profit });
     }
 
@@ -206,7 +225,7 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
                     dataKey="value"
                   >
                     {expenseByCategory.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      <Cell key={`cell-${index}`} fill={entry.color || DEFAULT_COLORS[index % DEFAULT_COLORS.length]} />
                     ))}
                   </Pie>
                   <Tooltip formatter={(value: number) => `$${value.toLocaleString()}`} />
@@ -252,7 +271,7 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
                  data={sankeyData}
                  node={
                    <SankeyNode 
-                     containerWidth={0} // We don't have container width easily in custom node, will use relative logic
+                     containerWidth={0}
                    />
                  }
                  nodePadding={50}
@@ -274,14 +293,8 @@ const Dashboard: React.FC<DashboardProps> = ({ transactions, categories }) => {
 // Custom Node Component for Sankey
 const SankeyNode = ({ x, y, width, height, index, payload }: any) => {
   if (!payload || !payload.value) return null;
-
-  // Simple heuristic for text positioning based on node name type or just alternating
-  // Standard Sankey: Source (Left) -> Middle -> Target (Right)
-  // We can try to guess side based on X, but keeping it simple: Text inside if large, outside if small
   
   const isLeft = x < 100;
-  const isRight = x > 300; // Arbitrary breakpoint for responsive container, but visual logic:
-  // Better: Text on right for left nodes, text on left for right nodes.
 
   return (
     <Layer key={`CustomNode${index}`}>
