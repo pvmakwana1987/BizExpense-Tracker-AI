@@ -1,5 +1,7 @@
 {
-  "name": "BizTrack AI",
+  "name": "BizXpense AI",
   "description": "Smart expense tracking for small businesses with AI-powered categorization and CSV import.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [
+    "camera"
+  ]
 }

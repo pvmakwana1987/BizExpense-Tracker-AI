@@ -59,7 +59,7 @@ const App: React.FC = () => {
             <div className="w-8 h-8 bg-accent rounded-lg flex items-center justify-center">
               <span className="font-bold text-white">B</span>
             </div>
-            <h1 className="text-xl font-bold tracking-tight">BizTrack AI</h1>
+            <h1 className="text-xl font-bold tracking-tight">BizXpense AI</h1>
           </div>
           <p className="text-xs text-gray-400 mt-2">Business Expense Tracker</p>
         </div>
@@ -80,7 +80,7 @@ const App: React.FC = () => {
         </nav>
 
         <div className="p-4 border-t border-gray-800 text-xs text-gray-500">
-          <p>&copy; 2024 BizTrack Inc.</p>
+          <p>&copy; 2024 BizXpense Inc.</p>
         </div>
       </aside>
 
