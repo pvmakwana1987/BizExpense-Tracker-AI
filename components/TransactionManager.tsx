@@ -96,6 +96,19 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     return isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
   };
 
+  const resetImportState = () => {
+    setShowMapper(false);
+    setShowCategoryMapper(false);
+    setShowDuplicateReview(false);
+    setShowGSheetModal(false);
+    setImportPreview(null);
+    allImportRowsRef.current = [];
+    setImportCandidates({ clean: [], duplicates: [] });
+    setDuplicatesToKeep(new Set());
+    setUnmappedCategories([]);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   const handleResizeStart = (e: React.MouseEvent, colKey: string) => {
     e.preventDefault();
     resizingCol.current = colKey;
@@ -183,29 +196,37 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
 
   // --- Import Logic ---
   const handleFileSelect = (file: File) => {
+    // Reset any previous import state first
+    resetImportState();
+    
     if (file.name.endsWith('.csv')) {
       const reader = new FileReader();
       reader.onload = e => processCSV(e.target?.result as string);
+      reader.onerror = () => alert("Error reading file");
       reader.readAsText(file);
     } else {
       const reader = new FileReader();
       reader.onload = e => {
-        const wb = XLSX.read(e.target?.result, { type: 'binary' });
-        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false });
-        allImportRowsRef.current = rows as string[][];
-        setImportPreview(rows.slice(0, 5) as string[][]);
-        setShowMapper(true);
+        try {
+          const data = e.target?.result;
+          const wb = XLSX.read(data, { type: 'array' });
+          const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false, dateNF: 'yyyy-mm-dd' });
+          allImportRowsRef.current = rows as string[][];
+          setImportPreview(rows.slice(0, 6) as string[][]);
+          setShowMapper(true);
+        } catch (err) {
+          console.error(err);
+          alert("Failed to parse Excel file. Please ensure it is a valid .xlsx or .xls file.");
+        }
       };
-      reader.readAsBinaryString(file);
+      reader.readAsArrayBuffer(file);
     }
-    // Reset file input
-    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const processCSV = (text: string) => {
       const rows = text.split('\n').map(r => r.split(',').map(c => c.replace(/^"|"$/g, '').trim())).filter(r => r.length > 1);
       allImportRowsRef.current = rows;
-      setImportPreview(rows.slice(0, 5));
+      setImportPreview(rows.slice(0, 6));
       setShowMapper(true);
   }
 
@@ -220,6 +241,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     setIsProcessing(true);
     try {
       const res = await fetch(exportUrl);
+      if (!res.ok) throw new Error("Failed to fetch");
       const text = await res.text();
       processCSV(text);
       setShowGSheetModal(false);
@@ -248,7 +270,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
       setShowSimpleFinModal(false);
       setShowDuplicateReview(true);
     } catch (e) {
-      alert("Failed to sync SimpleFin.");
+      alert("Failed to sync SimpleFin. Check your Bridge URL.");
       console.error(e);
     }
     setIsProcessing(false);
@@ -284,14 +306,13 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
       const acc = columnMapping.account > -1 ? row[columnMapping.account] : importAccountName;
 
       // Category extraction
-      let catId = '';
       if (columnMapping.category > -1) {
         const catName = row[columnMapping.category]?.trim();
         if (catName) foundCategories.add(catName);
       }
 
       newTxns.push({
-        id: `imp-${Date.now()}-${idx}`,
+        id: `imp-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 5)}`,
         date,
         description: desc,
         amount,
@@ -312,7 +333,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
       setShowCategoryMapper(true);
     } else {
       // Proceed to Duplicate Check
-      performDuplicateCheck(newTxns, {});
+      performDuplicateCheck(newTxns, {}, categories);
     }
   };
 
@@ -332,7 +353,6 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
            color: '#94a3b8'
          });
        }
-       // If mapped to existing ID, we handle in next step
     });
 
     setCategories(newCats);
@@ -347,12 +367,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     const dups: Transaction[] = [];
 
     txns.forEach(t => {
-      // Resolve Category if exists in original row
-      // Note: We need original row data to do this accurately, but for simplicity here we assume simple mapping
-      // In a real app, we'd pass original row data through. 
-      // For now, let's assume we proceed without auto-assigning mapped categories unless we rebuilt the txn objects.
-      // ... (Simplification: skipping complex category re-assignment for this snippet, focusing on dup check)
-
+      // Basic check: same date, amount, description
       const isDup = transactions.some(exist => 
         exist.date.split('T')[0] === t.date.split('T')[0] && 
         Math.abs(exist.amount - t.amount) < 0.01 && 
@@ -372,13 +387,17 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     const finalDups = importCandidates.duplicates.filter(d => duplicatesToKeep.has(d.id));
     const toAdd = [...importCandidates.clean, ...finalDups];
     setTransactions(prev => [...toAdd, ...prev]);
-    setShowDuplicateReview(false);
-    setDuplicatesToKeep(new Set());
-    setImportCandidates({ clean: [], duplicates: [] });
+    resetImportState();
   };
   
   // --- Category Selector Logic ---
   const handleUnifiedCategoryChange = (transactionId: string, value: string) => {
+    if (!value) {
+       // Revert to uncategorized
+       setTransactions(prev => prev.map(t => t.id === transactionId ? { ...t, categoryId: undefined, subcategoryId: undefined } : t));
+       return;
+    }
+
     let catId = '', subId: string | undefined = undefined;
 
     // Direct Category ID check
@@ -476,6 +495,13 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
          setSelectedIds(new Set());
          setBulkCategorySelect('');
      }
+  };
+
+  const handleBulkDelete = () => {
+    if (confirm(`Are you sure you want to delete ${selectedIds.size} transactions?`)) {
+      setTransactions(prev => prev.filter(t => !selectedIds.has(t.id)));
+      setSelectedIds(new Set());
+    }
   };
 
   // --- Rules Engine ---
@@ -599,7 +625,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
                 {renderCategoryOptions()}
             </select>
             <button onClick={handleBulkUpdate} className="px-3 py-1 bg-accent rounded text-xs hover:bg-blue-600">Apply</button>
-            <button onClick={() => { if(confirm('Delete selected?')) { setTransactions(prev => prev.filter(t => !selectedIds.has(t.id))); setSelectedIds(new Set()); }}} className="px-3 py-1 bg-red-600 rounded text-xs hover:bg-red-700 ml-auto">Delete</button>
+            <button onClick={handleBulkDelete} className="px-3 py-1 bg-red-600 rounded text-xs hover:bg-red-700 ml-auto">Delete</button>
          </div>
        )}
 
@@ -667,7 +693,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
                            </div>
                         </td>
                         <td className="px-4 py-2"><input type="text" className="w-full bg-transparent text-xs border-none focus:ring-0 placeholder-gray-300" placeholder="Notes..." value={t.comments || ''} onChange={e => setTransactions(prev => prev.map(pt => pt.id === t.id ? { ...pt, comments: e.target.value } : pt))} /></td>
-                        <td className="px-4 py-2 text-right"><button onClick={() => setTransactions(prev => prev.filter(pt => pt.id !== t.id))} className="text-gray-400 hover:text-red-500"><TrashIcon className="w-4 h-4" /></button></td>
+                        <td className="px-4 py-2 text-right"><button onClick={() => setTransactions(prev => prev.filter(pt => pt.id !== t.id))} className="text-gray-400 hover:text-red-500 p-1 rounded hover:bg-gray-100"><TrashIcon className="w-4 h-4" /></button></td>
                      </tr>
                   );
                })}
@@ -703,14 +729,34 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        {/* Import Mapper Modal */}
        {showMapper && importPreview && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[600px] shadow-2xl max-h-[90vh] overflow-y-auto">
+             <div className="bg-white p-6 rounded-xl w-[700px] shadow-2xl max-h-[90vh] overflow-y-auto">
                 <h3 className="font-bold mb-4 text-lg">Map Import Columns</h3>
-                <div className="text-sm text-gray-500 mb-4">Preview of first 5 rows:</div>
+                <div className="text-sm text-gray-500 mb-4">Preview of first 5 rows. Use the inputs below to match columns.</div>
+                
+                {/* Visual Legend */}
+                <div className="flex gap-4 text-xs mb-2">
+                   <div className="flex items-center gap-1"><span className="w-3 h-3 bg-blue-100 border border-blue-400 rounded"></span> Date</div>
+                   <div className="flex items-center gap-1"><span className="w-3 h-3 bg-yellow-100 border border-yellow-400 rounded"></span> Description</div>
+                   <div className="flex items-center gap-1"><span className="w-3 h-3 bg-green-100 border border-green-400 rounded"></span> Amount</div>
+                </div>
+
                 <div className="overflow-x-auto mb-6 border rounded bg-gray-50 p-2">
                    <table className="text-xs w-full">
                      <tbody>
                        {importPreview.map((row, i) => (
-                         <tr key={i}><td className="font-bold pr-2">{i+1}.</td>{row.map((cell, j) => <td key={j} className="border px-1 max-w-[100px] truncate">{cell}</td>)}</tr>
+                         <tr key={i}>
+                            <td className="font-bold pr-2 text-gray-400">{i+1}.</td>
+                            {row.map((cell, j) => {
+                               let bgClass = "";
+                               if (j === columnMapping.date) bgClass = "bg-blue-100 border-blue-200";
+                               else if (j === columnMapping.description) bgClass = "bg-yellow-100 border-yellow-200";
+                               else if (!useSplitMode && j === columnMapping.amount) bgClass = "bg-green-100 border-green-200";
+                               else if (useSplitMode && j === columnMapping.debit) bgClass = "bg-red-50 border-red-200";
+                               else if (useSplitMode && j === columnMapping.credit) bgClass = "bg-green-50 border-green-200";
+                               
+                               return <td key={j} className={`border px-1 max-w-[100px] truncate ${bgClass}`}>{cell}</td>
+                            })}
+                         </tr>
                        ))}
                      </tbody>
                    </table>
@@ -723,57 +769,51 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
                   </div>
 
                   <div className="grid grid-cols-2 gap-4">
-                    <div><label className="text-xs font-bold">Date Column Index (0-based)</label><input type="number" className="w-full border rounded p-1" value={columnMapping.date} onChange={e => setColumnMapping({...columnMapping, date: parseInt(e.target.value)})} /></div>
-                    <div><label className="text-xs font-bold">Description Column</label><input type="number" className="w-full border rounded p-1" value={columnMapping.description} onChange={e => setColumnMapping({...columnMapping, description: parseInt(e.target.value)})} /></div>
+                    <div className="p-2 border-l-4 border-blue-400 bg-gray-50 rounded">
+                       <label className="text-xs font-bold text-blue-800">Date Column Index (0-based)</label>
+                       <input type="number" className="w-full border rounded p-1 border-blue-300 focus:ring-blue-200" value={columnMapping.date} onChange={e => setColumnMapping({...columnMapping, date: parseInt(e.target.value)})} />
+                    </div>
+                    <div className="p-2 border-l-4 border-yellow-400 bg-gray-50 rounded">
+                       <label className="text-xs font-bold text-yellow-800">Description Column</label>
+                       <input type="number" className="w-full border rounded p-1 border-yellow-300 focus:ring-yellow-200" value={columnMapping.description} onChange={e => setColumnMapping({...columnMapping, description: parseInt(e.target.value)})} />
+                    </div>
                     {!useSplitMode ? (
-                      <div><label className="text-xs font-bold">Amount Column</label><input type="number" className="w-full border rounded p-1" value={columnMapping.amount} onChange={e => setColumnMapping({...columnMapping, amount: parseInt(e.target.value)})} /></div>
+                      <div className="p-2 border-l-4 border-green-400 bg-gray-50 rounded">
+                         <label className="text-xs font-bold text-green-800">Amount Column</label>
+                         <input type="number" className="w-full border rounded p-1 border-green-300 focus:ring-green-200" value={columnMapping.amount} onChange={e => setColumnMapping({...columnMapping, amount: parseInt(e.target.value)})} />
+                      </div>
                     ) : (
                       <>
-                        <div><label className="text-xs font-bold">Debit Column</label><input type="number" className="w-full border rounded p-1" value={columnMapping.debit} onChange={e => setColumnMapping({...columnMapping, debit: parseInt(e.target.value)})} /></div>
-                        <div><label className="text-xs font-bold">Credit Column</label><input type="number" className="w-full border rounded p-1" value={columnMapping.credit} onChange={e => setColumnMapping({...columnMapping, credit: parseInt(e.target.value)})} /></div>
+                        <div className="p-2 border-l-4 border-red-400 bg-gray-50 rounded">
+                           <label className="text-xs font-bold text-red-800">Debit (Expense) Column</label>
+                           <input type="number" className="w-full border rounded p-1" value={columnMapping.debit} onChange={e => setColumnMapping({...columnMapping, debit: parseInt(e.target.value)})} />
+                        </div>
+                        <div className="p-2 border-l-4 border-green-400 bg-gray-50 rounded">
+                           <label className="text-xs font-bold text-green-800">Credit (Income) Column</label>
+                           <input type="number" className="w-full border rounded p-1" value={columnMapping.credit} onChange={e => setColumnMapping({...columnMapping, credit: parseInt(e.target.value)})} />
+                        </div>
                       </>
                     )}
-                    <div><label className="text-xs font-bold">Account Column (Optional)</label><input type="number" className="w-full border rounded p-1" value={columnMapping.account} onChange={e => setColumnMapping({...columnMapping, account: parseInt(e.target.value)})} /></div>
-                    <div><label className="text-xs font-bold">Category Column (Optional)</label><input type="number" className="w-full border rounded p-1" value={columnMapping.category} onChange={e => setColumnMapping({...columnMapping, category: parseInt(e.target.value)})} /></div>
+                    <div className="p-2 border-l-4 border-gray-400 bg-gray-50 rounded">
+                       <label className="text-xs font-bold text-gray-800">Category (Optional)</label>
+                       <input type="number" className="w-full border rounded p-1" value={columnMapping.category} onChange={e => setColumnMapping({...columnMapping, category: parseInt(e.target.value)})} />
+                    </div>
+                    <div className="p-2 border-l-4 border-gray-400 bg-gray-50 rounded">
+                       <label className="text-xs font-bold text-gray-800">Account (Optional)</label>
+                       <input type="number" className="w-full border rounded p-1" value={columnMapping.account} onChange={e => setColumnMapping({...columnMapping, account: parseInt(e.target.value)})} />
+                    </div>
                   </div>
-
-                  <div>
+                  
+                  <div className="p-2 bg-gray-50 rounded">
                      <label className="text-xs font-bold">Default Account Name</label>
                      <input type="text" className="w-full border rounded p-1" value={importAccountName} onChange={e => setImportAccountName(e.target.value)} />
                   </div>
                 </div>
 
                 <div className="flex gap-2 mt-6">
-                   <button onClick={() => setShowMapper(false)} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={handleProcessImport} className="flex-1 py-2 bg-primary text-white rounded">Next</button>
+                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded hover:bg-gray-200">Cancel</button>
+                   <button onClick={handleProcessImport} className="flex-1 py-2 bg-accent text-white rounded hover:bg-blue-600">Next</button>
                 </div>
-             </div>
-          </div>
-       )}
-
-       {/* Category Mapper Modal */}
-       {showCategoryMapper && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[500px] shadow-2xl">
-                <h3 className="font-bold mb-2">Unknown Categories Found</h3>
-                <p className="text-sm text-gray-500 mb-4">Map these imported categories to your existing ones, or create new ones.</p>
-                <div className="max-h-[300px] overflow-y-auto space-y-2 mb-4">
-                  {unmappedCategories.map(cat => (
-                    <div key={cat} className="flex items-center justify-between bg-gray-50 p-2 rounded">
-                       <span className="font-medium text-sm">{cat}</span>
-                       <select 
-                         className="text-xs border rounded p-1 w-40"
-                         onChange={e => setCategoryMapping({...categoryMapping, [cat]: e.target.value})}
-                         value={categoryMapping[cat] || 'NEW'}
-                       >
-                          <option value="NEW">Create New</option>
-                          <option disabled>---</option>
-                          {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                       </select>
-                    </div>
-                  ))}
-                </div>
-                <button onClick={handleCategoryMapConfirm} className="w-full py-2 bg-primary text-white rounded">Confirm Mappings</button>
              </div>
           </div>
        )}
@@ -781,36 +821,66 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        {/* Duplicate Review Modal */}
        {showDuplicateReview && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[600px] max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
-                <h3 className="font-bold mb-2 flex items-center gap-2"><AlertIcon className="w-5 h-5 text-orange-500" /> Review Import</h3>
-                <div className="flex-1 overflow-y-auto mb-4">
-                   {importCandidates.duplicates.length > 0 && (
-                     <div className="mb-4">
-                       <h4 className="font-bold text-sm text-orange-600 mb-2">Potential Duplicates ({importCandidates.duplicates.length})</h4>
-                       {importCandidates.duplicates.map(t => (
-                         <div key={t.id} className="flex items-center gap-2 text-sm p-2 border-b">
-                            <input type="checkbox" checked={duplicatesToKeep.has(t.id)} onChange={e => {
-                               const s = new Set(duplicatesToKeep);
-                               if (e.target.checked) s.add(t.id); else s.delete(t.id);
-                               setDuplicatesToKeep(s);
-                            }} />
-                            <span className="text-gray-500 w-24">{t.date.split('T')[0]}</span>
-                            <span className="flex-1 truncate">{t.description}</span>
-                            <span className="font-bold">${t.amount}</span>
-                         </div>
-                       ))}
-                     </div>
-                   )}
-                   <div>
-                      <h4 className="font-bold text-sm text-green-600 mb-2">New Transactions ({importCandidates.clean.length})</h4>
-                      <p className="text-xs text-gray-400">These will be added automatically.</p>
-                   </div>
+             <div className="bg-white p-6 rounded-xl w-[600px] shadow-2xl max-h-[80vh] overflow-y-auto">
+                <div className="flex items-center gap-2 mb-4">
+                   <AlertIcon className="w-6 h-6 text-orange-500" />
+                   <h3 className="font-bold text-lg">Review Duplicates</h3>
                 </div>
-                <div className="flex gap-2 pt-4 border-t">
-                   <button onClick={() => setShowDuplicateReview(false)} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={finalizeImport} className="flex-1 py-2 bg-success text-white rounded">Import {importCandidates.clean.length + duplicatesToKeep.size} Items</button>
+                <p className="text-sm text-gray-600 mb-4">We found {importCandidates.duplicates.length} potential duplicates. Uncheck items you want to discard.</p>
+                
+                <div className="space-y-2 mb-4">
+                   {importCandidates.duplicates.map(d => (
+                      <div key={d.id} className="flex items-center gap-3 p-2 border rounded bg-orange-50">
+                         <input type="checkbox" checked={duplicatesToKeep.has(d.id)} onChange={e => {
+                            const newSet = new Set(duplicatesToKeep);
+                            if (e.target.checked) newSet.add(d.id); else newSet.delete(d.id);
+                            setDuplicatesToKeep(newSet);
+                         }} />
+                         <div className="flex-1 text-xs">
+                            <div className="font-bold">{d.date.split('T')[0]} - ${d.amount}</div>
+                            <div className="truncate">{d.description}</div>
+                         </div>
+                         <div className="text-xs text-orange-600 font-bold">Duplicate</div>
+                      </div>
+                   ))}
+                </div>
+                
+                <p className="text-sm text-gray-600 mb-4">{importCandidates.clean.length} new clean transactions will be added.</p>
+
+                <div className="flex gap-2">
+                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
+                   <button onClick={finalizeImport} className="flex-1 py-2 bg-success text-white rounded">Import Transactions</button>
                 </div>
              </div>
+          </div>
+       )}
+
+       {/* Unknown Categories Modal */}
+       {showCategoryMapper && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white p-6 rounded-xl w-[500px] shadow-2xl">
+               <h3 className="font-bold mb-4">Map Unknown Categories</h3>
+               <p className="text-sm text-gray-500 mb-4">We found categories in your file that don't exist in your system. Map them to existing ones or create new ones.</p>
+               <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+                  {unmappedCategories.map(cat => (
+                     <div key={cat} className="flex items-center justify-between p-2 border rounded">
+                        <span className="font-bold text-sm">{cat}</span>
+                        <select 
+                           className="text-sm border rounded p-1 w-48" 
+                           value={categoryMapping[cat] || 'NEW'} 
+                           onChange={e => setCategoryMapping(prev => ({...prev, [cat]: e.target.value}))}
+                        >
+                           <option value="NEW">Create New Category</option>
+                           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+                     </div>
+                  ))}
+               </div>
+               <div className="flex gap-2 mt-4">
+                  <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded">Cancel Import</button>
+                  <button onClick={handleCategoryMapConfirm} className="flex-1 py-2 bg-accent text-white rounded">Continue</button>
+               </div>
+            </div>
           </div>
        )}
 
@@ -818,12 +888,12 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        {showGSheetModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
              <div className="bg-white p-6 rounded-xl w-96 shadow-2xl">
-                <h3 className="font-bold mb-4 flex items-center gap-2"><GoogleSheetIcon className="w-5 h-5 text-green-600" /> Import from Google Sheet</h3>
-                <p className="text-xs text-gray-500 mb-4">Paste a link to a publicly visible Google Sheet (or "Published to Web").</p>
-                <input type="text" className="w-full border rounded px-3 py-2 mb-4" placeholder="https://docs.google.com/spreadsheets/..." value={gsheetUrl} onChange={e => setGsheetUrl(e.target.value)} />
+                <h3 className="font-bold mb-4 flex items-center gap-2"><GoogleSheetIcon className="w-5 h-5 text-green-600" /> Import Google Sheet</h3>
+                <p className="text-xs text-gray-500 mb-4">Ensure your sheet is "Published to the web" (File {'>'} Share {'>'} Publish to web) and select CSV format, or use a public link.</p>
+                <input type="text" placeholder="Paste Google Sheet URL" className="w-full border rounded px-3 py-2 mb-4" value={gsheetUrl} onChange={e => setGsheetUrl(e.target.value)} />
                 <div className="flex gap-2">
                    <button onClick={() => setShowGSheetModal(false)} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={fetchGoogleSheet} disabled={isProcessing} className="flex-1 py-2 bg-green-600 text-white rounded disabled:opacity-50">{isProcessing ? 'Fetching...' : 'Fetch Data'}</button>
+                   <button onClick={fetchGoogleSheet} className="flex-1 py-2 bg-green-600 text-white rounded">Fetch Data</button>
                 </div>
              </div>
           </div>
@@ -833,113 +903,116 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        {showSimpleFinModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
              <div className="bg-white p-6 rounded-xl w-96 shadow-2xl">
-                <h3 className="font-bold mb-4 flex items-center gap-2"><BankIcon className="w-5 h-5 text-blue-600" /> Sync with Bank</h3>
-                <p className="text-xs text-gray-500 mb-4">Enter your SimpleFin Bridge URL.</p>
-                <input type="password" className="w-full border rounded px-3 py-2 mb-4" placeholder="https://user:pass@bridge.simplefin.org/..." value={simpleFinUrl} onChange={e => setSimpleFinUrl(e.target.value)} />
+                <h3 className="font-bold mb-4 flex items-center gap-2"><BankIcon className="w-5 h-5 text-accent" /> Sync with SimpleFin</h3>
+                <p className="text-xs text-gray-500 mb-4">Enter your SimpleFin Bridge URL. This URL contains your credentials securely.</p>
+                <input type="password" placeholder="https://user:pass@bridge.simplefin.org/..." className="w-full border rounded px-3 py-2 mb-4" value={simpleFinUrl} onChange={e => setSimpleFinUrl(e.target.value)} />
                 <div className="flex gap-2">
                    <button onClick={() => setShowSimpleFinModal(false)} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={syncSimpleFin} disabled={isProcessing} className="flex-1 py-2 bg-blue-600 text-white rounded disabled:opacity-50">{isProcessing ? 'Syncing...' : 'Sync Now'}</button>
+                   <button onClick={syncSimpleFin} className="flex-1 py-2 bg-accent text-white rounded">Sync</button>
                 </div>
              </div>
           </div>
        )}
 
-       {/* Rules Manager Modal */}
-       {showRulesModal && (
+        {/* Rules Manager Modal */}
+        {showRulesModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[700px] h-[600px] flex flex-col shadow-2xl">
-                <h3 className="font-bold mb-4 text-lg border-b pb-2">Automation Rules</h3>
+             <div className="bg-white p-6 rounded-xl w-[800px] h-[80vh] shadow-2xl flex flex-col">
+                <div className="flex justify-between items-center mb-4 border-b pb-2">
+                   <h3 className="font-bold text-lg flex items-center gap-2"><RobotIcon className="w-5 h-5" /> Auto-Categorization Rules</h3>
+                   <button onClick={() => setShowRulesModal(false)} className="text-gray-400 hover:text-gray-600">&times;</button>
+                </div>
                 
                 <div className="flex-1 overflow-y-auto flex gap-4">
-                   {/* Rules List */}
+                   {/* Rule List */}
                    <div className="w-1/3 border-r pr-4 space-y-2">
-                      <button onClick={() => setActiveRule({ name: 'New Rule', matchLogic: 'AND', conditions: [], isActive: true })} className="w-full py-2 bg-gray-100 hover:bg-gray-200 rounded text-sm font-medium mb-2">+ New Rule</button>
+                      <button onClick={() => setActiveRule({ name: 'New Rule', matchLogic: 'AND', conditions: [], isActive: true })} className="w-full py-2 border-2 border-dashed rounded text-sm text-gray-500 hover:bg-gray-50 mb-2">+ Create Rule</button>
                       {rules.map(r => (
-                        <div key={r.id} onClick={() => setActiveRule(r)} className={`p-2 rounded cursor-pointer text-sm ${activeRule?.id === r.id ? 'bg-blue-50 border border-blue-200' : 'hover:bg-gray-50 border border-transparent'}`}>
-                           <div className="font-bold">{r.name}</div>
-                           <div className="text-xs text-gray-500">{r.conditions.length} conditions</div>
-                        </div>
+                         <div key={r.id} onClick={() => setActiveRule(r)} className={`p-3 rounded border cursor-pointer text-sm ${activeRule?.id === r.id ? 'bg-blue-50 border-blue-300' : 'hover:bg-gray-50'}`}>
+                            <div className="font-bold truncate">{r.name}</div>
+                            <div className="text-xs text-gray-400">{r.conditions.length} conditions</div>
+                         </div>
                       ))}
                    </div>
-
-                   {/* Editor */}
+                   
+                   {/* Rule Editor */}
                    <div className="flex-1 pl-2">
-                     {activeRule ? (
-                       <div className="space-y-4">
-                          <div>
-                            <label className="text-xs font-bold">Rule Name</label>
-                            <input type="text" className="w-full border rounded p-2 text-sm" value={activeRule.name} onChange={e => setActiveRule({...activeRule, name: e.target.value})} />
-                          </div>
+                      {activeRule ? (
+                         <div className="space-y-4">
+                            <div>
+                               <label className="text-xs font-bold block mb-1">Rule Name</label>
+                               <input type="text" className="w-full border rounded px-2 py-1" value={activeRule.name || ''} onChange={e => setActiveRule({...activeRule, name: e.target.value})} />
+                            </div>
+                            
+                            <div>
+                               <label className="text-xs font-bold block mb-1">Match Logic</label>
+                               <div className="flex gap-4 text-sm">
+                                  <label className="flex items-center gap-1"><input type="radio" name="logic" checked={activeRule.matchLogic === 'AND'} onChange={() => setActiveRule({...activeRule, matchLogic: 'AND'})} /> All conditions (AND)</label>
+                                  <label className="flex items-center gap-1"><input type="radio" name="logic" checked={activeRule.matchLogic === 'OR'} onChange={() => setActiveRule({...activeRule, matchLogic: 'OR'})} /> Any condition (OR)</label>
+                               </div>
+                            </div>
 
-                          <div className="bg-gray-50 p-3 rounded">
-                             <div className="flex justify-between items-center mb-2">
-                               <label className="text-xs font-bold">Conditions</label>
-                               <select className="text-xs border rounded" value={activeRule.matchLogic} onChange={e => setActiveRule({...activeRule, matchLogic: e.target.value as RuleLogic})}>
-                                  <option value="AND">Match ALL (AND)</option>
-                                  <option value="OR">Match ANY (OR)</option>
-                               </select>
-                             </div>
-                             <div className="space-y-2">
-                               {activeRule.conditions?.map((c, idx) => (
-                                 <div key={idx} className="flex gap-2">
-                                    <select className="text-xs border rounded w-24" value={c.field} onChange={e => {
-                                       const newC = [...(activeRule.conditions||[])];
-                                       newC[idx].field = e.target.value as RuleField;
-                                       setActiveRule({...activeRule, conditions: newC});
-                                    }}>
-                                      <option value="description">Desc</option>
-                                      <option value="amount">Amount</option>
-                                      <option value="account">Account</option>
-                                    </select>
-                                    <select className="text-xs border rounded w-24" value={c.operator} onChange={e => {
-                                       const newC = [...(activeRule.conditions||[])];
-                                       newC[idx].operator = e.target.value as RuleOperator;
-                                       setActiveRule({...activeRule, conditions: newC});
-                                    }}>
-                                      <option value="contains">Contains</option>
-                                      <option value="equals">Equals</option>
-                                      <option value="starts_with">Starts With</option>
-                                      <option value="greater">Greater (&gt;)</option>
-                                      <option value="less">Less (&lt;)</option>
-                                    </select>
-                                    <input type="text" className="flex-1 text-xs border rounded px-2" value={c.value} onChange={e => {
-                                       const newC = [...(activeRule.conditions||[])];
-                                       newC[idx].value = e.target.value;
-                                       setActiveRule({...activeRule, conditions: newC});
-                                    }} />
-                                    <button onClick={() => {
-                                       const newC = activeRule.conditions?.filter((_, i) => i !== idx);
-                                       setActiveRule({...activeRule, conditions: newC});
-                                    }} className="text-red-500 hover:text-red-700">&times;</button>
-                                 </div>
+                            <div className="bg-gray-50 p-3 rounded border">
+                               <label className="text-xs font-bold block mb-2">Conditions</label>
+                               {activeRule.conditions?.map((c, i) => (
+                                  <div key={i} className="flex gap-2 mb-2 items-center">
+                                     <select className="text-xs border rounded p-1" value={c.field} onChange={e => {
+                                        const newConds = [...(activeRule.conditions||[])];
+                                        newConds[i] = { ...c, field: e.target.value as any };
+                                        setActiveRule({...activeRule, conditions: newConds});
+                                     }}>
+                                        <option value="description">Description</option>
+                                        <option value="amount">Amount</option>
+                                        <option value="account">Account</option>
+                                     </select>
+                                     <select className="text-xs border rounded p-1" value={c.operator} onChange={e => {
+                                        const newConds = [...(activeRule.conditions||[])];
+                                        newConds[i] = { ...c, operator: e.target.value as any };
+                                        setActiveRule({...activeRule, conditions: newConds});
+                                     }}>
+                                        <option value="contains">Contains</option>
+                                        <option value="equals">Equals</option>
+                                        <option value="starts_with">Starts With</option>
+                                        <option value="greater">Greater Than</option>
+                                        <option value="less">Less Than</option>
+                                     </select>
+                                     <input type="text" className="text-xs border rounded p-1 flex-1" value={c.value} onChange={e => {
+                                        const newConds = [...(activeRule.conditions||[])];
+                                        newConds[i] = { ...c, value: e.target.value };
+                                        setActiveRule({...activeRule, conditions: newConds});
+                                     }} />
+                                     <button onClick={() => {
+                                        const newConds = activeRule.conditions?.filter((_, idx) => idx !== i);
+                                        setActiveRule({...activeRule, conditions: newConds});
+                                     }} className="text-red-500 hover:text-red-700">&times;</button>
+                                  </div>
                                ))}
                                <button onClick={() => setActiveRule({...activeRule, conditions: [...(activeRule.conditions||[]), { id: Date.now().toString(), field: 'description', operator: 'contains', value: '' }]})} className="text-xs text-blue-600 hover:underline">+ Add Condition</button>
-                             </div>
-                          </div>
+                            </div>
 
-                          <div className="p-3 border rounded bg-blue-50">
-                             <label className="text-xs font-bold block mb-2">Assign To Category</label>
-                             <select className="w-full text-sm border rounded p-2" value={activeRule.targetCategoryId} onChange={e => setActiveRule({...activeRule, targetCategoryId: e.target.value})}>
-                                {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                             </select>
-                          </div>
+                            <div>
+                               <label className="text-xs font-bold block mb-1">Assign To Category</label>
+                               <select className="w-full border rounded px-2 py-1 text-sm" value={activeRule.targetCategoryId} onChange={e => setActiveRule({...activeRule, targetCategoryId: e.target.value})}>
+                                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                               </select>
+                            </div>
 
-                          <div className="flex gap-2 pt-4">
-                             <button onClick={() => {
-                                setRules(prev => prev.filter(r => r.id !== activeRule.id));
-                                setActiveRule(null);
-                             }} className="px-4 py-2 bg-red-100 text-red-600 rounded text-sm hover:bg-red-200">Delete</button>
-                             <div className="flex-1"></div>
-                             <button onClick={saveRule} className="px-6 py-2 bg-primary text-white rounded text-sm hover:bg-slate-800">Save Rule</button>
-                          </div>
-                       </div>
-                     ) : (
-                       <div className="h-full flex items-center justify-center text-gray-400 text-sm">Select or create a rule to edit</div>
-                     )}
+                            <div className="pt-4 border-t flex justify-end gap-2">
+                               <button onClick={() => {
+                                  if (activeRule.id && rules.find(r => r.id === activeRule.id)) {
+                                     setRules(prev => prev.filter(r => r.id !== activeRule.id));
+                                     setActiveRule(null);
+                                  } else {
+                                     setActiveRule(null);
+                                  }
+                               }} className="text-red-500 text-sm px-3 py-1">Delete Rule</button>
+                               <button onClick={saveRule} className="bg-primary text-white text-sm px-4 py-1 rounded">Save Rule</button>
+                            </div>
+                         </div>
+                      ) : (
+                         <div className="h-full flex items-center justify-center text-gray-400">Select or create a rule</div>
+                      )}
                    </div>
-                </div>
-                <div className="mt-4 pt-4 border-t flex justify-end">
-                   <button onClick={() => setShowRulesModal(false)} className="px-4 py-2 bg-gray-200 rounded text-sm hover:bg-gray-300">Close</button>
                 </div>
              </div>
           </div>

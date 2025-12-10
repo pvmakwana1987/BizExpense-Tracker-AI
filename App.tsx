@@ -3,7 +3,8 @@ import Dashboard from './components/Dashboard';
 import TransactionManager from './components/TransactionManager';
 import CategoryManager from './components/CategoryManager';
 import Insights from './components/Insights';
-import { ChartIcon, ListIcon, SettingsIcon, ChatIcon } from './components/Icons';
+import ReconciliationManager from './components/ReconciliationManager';
+import { ChartIcon, ListIcon, SettingsIcon, ChatIcon, ScaleIcon } from './components/Icons';
 import { Category, Transaction, TransactionType, AutoCategoryRule } from './types';
 
 // Default Data
@@ -20,7 +21,7 @@ const DEFAULT_CATEGORIES: Category[] = [
 ];
 
 const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'transactions' | 'settings' | 'insights'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'transactions' | 'settings' | 'insights' | 'reconciliation'>('dashboard');
   
   // Persist State
   const [categories, setCategories] = useState<Category[]>(() => {
@@ -71,6 +72,9 @@ const App: React.FC = () => {
           <button onClick={() => setActiveTab('transactions')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'transactions' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
             <ListIcon className="w-5 h-5" /> Transactions
           </button>
+          <button onClick={() => setActiveTab('reconciliation')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'reconciliation' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
+            <ScaleIcon className="w-5 h-5" /> Reconciliation
+          </button>
           <button onClick={() => setActiveTab('insights')} className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-lg transition-colors ${activeTab === 'insights' ? 'bg-secondary text-white' : 'text-gray-400 hover:text-white hover:bg-white/10'}`}>
             <ChatIcon className="w-5 h-5" /> AI Insights
           </button>
@@ -112,6 +116,12 @@ const App: React.FC = () => {
                 setRules={setRules}
               />
             </div>
+          )}
+
+          {activeTab === 'reconciliation' && (
+             <div className="animate-fade-in">
+                <ReconciliationManager transactions={transactions} setTransactions={setTransactions} />
+             </div>
           )}
 
           {activeTab === 'insights' && (

@@ -34,6 +34,14 @@ export interface Transaction {
   anomalyReason?: string; // Reason for flag
 }
 
+export interface ReconciliationOrder {
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+  matchedTransactionId?: string;
+}
+
 export interface DateRange {
   start: Date;
   end: Date;
