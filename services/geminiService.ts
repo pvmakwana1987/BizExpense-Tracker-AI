@@ -1,29 +1,29 @@
 import { Category, Transaction, TransactionType, ReconciliationOrder, ReconciliationMatchSuggestion } from "../types";
 
-// Helper to call our backend proxy
-// This abstracts the actual Google SDK call, ensuring we use the Server's Vertex AI credentials
+// Helper to call AI via Backend Proxy (Vertex AI/Cloud Run)
 const generateContentProxy = async (model: string, contents: any, config: any) => {
   try {
     const response = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, contents, config })
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, contents, config })
     });
 
     if (!response.ok) {
-      throw new Error(`API Error: ${response.statusText}`);
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `Backend API Error: ${response.statusText}`);
     }
 
-    const data = await response.json();
-    return data;
+    return await response.json();
   } catch (error) {
     console.error("AI Service Error:", error);
     return null;
   }
 };
 
-// Helper to extract text from raw JSON response (mimicking SDK's .text getter)
+// Helper to extract text from raw JSON response
 const extractText = (response: any): string | null => {
+  // Standard Gemini Response Structure: candidates[0].content.parts[0].text
   return response?.candidates?.[0]?.content?.parts?.[0]?.text || null;
 };
 
@@ -56,7 +56,7 @@ export const autoCategorizeTransactions = async (
     Transactions to categorize: ${JSON.stringify(transactionList)}
   `;
 
-  const response = await generateContentProxy("gemini-1.5-flash", prompt, {
+  const response = await generateContentProxy("gemini-2.5-flash", prompt, {
     systemInstruction: SYSTEM_INSTRUCTION,
     responseMimeType: "application/json",
     // Schema passed as simple object for proxy
@@ -85,7 +85,7 @@ export const autoCategorizeTransactions = async (
 };
 
 export const parseReceiptImage = async (base64Image: string): Promise<Partial<Transaction> | null> => {
-  const response = await generateContentProxy("gemini-1.5-flash", {
+  const response = await generateContentProxy("gemini-2.5-flash", {
     parts: [
       { inlineData: { mimeType: "image/jpeg", data: base64Image } },
       { text: "Extract the transaction date, merchant name, total amount, and a brief description from this receipt. Return JSON." }
@@ -112,7 +112,7 @@ export const parseReceiptImage = async (base64Image: string): Promise<Partial<Tr
 };
 
 export const parsePdfStatement = async (base64Pdf: string): Promise<Transaction[]> => {
-  const response = await generateContentProxy("gemini-1.5-flash", {
+  const response = await generateContentProxy("gemini-2.5-flash", {
     parts: [
       { inlineData: { mimeType: "application/pdf", data: base64Pdf } },
       { text: "Extract all financial transactions from this bank statement PDF. Return a JSON array. For each transaction, provide date (YYYY-MM-DD), description, amount (absolute number), and type (INCOME or EXPENSE). Ignore headers/footers/page numbers." }
@@ -164,7 +164,7 @@ export const suggestReconciliationMatches = async (
 
   if (unmatchedTxns.length === 0 || unmatchedOrders.length === 0) return [];
 
-  const response = await generateContentProxy("gemini-1.5-flash", `
+  const response = await generateContentProxy("gemini-2.5-flash", `
     Analyze these bank transactions and orders to find matches for reconciliation.
     Look for:
     1. Exact matches (same date, same amount).
@@ -204,7 +204,7 @@ export const normalizeMerchants = async (transactions: Transaction[]): Promise<A
   const inputs = transactions.filter(t => !t.merchant).map(t => ({ id: t.id, desc: t.description }));
   if (inputs.length === 0) return [];
 
-  const response = await generateContentProxy("gemini-1.5-flash", 
+  const response = await generateContentProxy("gemini-2.5-flash", 
     `Normalize these transaction descriptions to clean merchant names (e.g., 'AMZN Mktp' -> 'Amazon'). Inputs: ${JSON.stringify(inputs)}`, 
     {
       responseMimeType: "application/json",
@@ -238,7 +238,7 @@ export const detectAnomalies = async (transactions: Transaction[]): Promise<Arra
     cat: t.categoryId 
   }));
 
-  const response = await generateContentProxy("gemini-1.5-flash", 
+  const response = await generateContentProxy("gemini-2.5-flash", 
     `Analyze these transactions for anomalies. Look for duplicates, unusually high amounts for a category, or strange patterns. Return IDs and reasons. Data: ${JSON.stringify(simplified)}`,
     {
       responseMimeType: "application/json",
@@ -266,7 +266,7 @@ export const detectAnomalies = async (transactions: Transaction[]): Promise<Arra
 export const getFinancialInsights = async (transactions: Transaction[], question: string): Promise<string> => {
     const simplified = transactions.slice(0, 100).map(t => `${t.date}: ${t.description} ($${t.amount})`); 
 
-    const response = await generateContentProxy("gemini-1.5-flash", 
+    const response = await generateContentProxy("gemini-2.5-flash", 
         `Context: User's recent financial transactions: ${JSON.stringify(simplified)}.
         
         User Question: ${question}
