@@ -1,7 +1,7 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { Category, Transaction, TransactionType, AutoCategoryRule, RuleCondition, RuleOperator, RuleField, RuleLogic } from '../types';
-import { UploadIcon, MagicWandIcon, TrashIcon, PlusCircleIcon, BankIcon, FileIcon, AlertIcon, GoogleSheetIcon, RobotIcon, CameraIcon, SparklesIcon, WarningIcon, ReceiptIcon, LinkIcon, CheckIcon, PlusIcon } from './Icons';
-import { autoCategorizeTransactions, parseReceiptImage, normalizeMerchants, detectAnomalies } from '../services/geminiService';
+import { UploadIcon, MagicWandIcon, TrashIcon, PlusCircleIcon, BankIcon, FileIcon, AlertIcon, GoogleSheetIcon, RobotIcon, CameraIcon, SparklesIcon, WarningIcon, ReceiptIcon, LinkIcon, CheckIcon, PlusIcon, PdfIcon } from './Icons';
+import { autoCategorizeTransactions, parseReceiptImage, normalizeMerchants, detectAnomalies, parsePdfStatement } from '../services/geminiService';
 import { fetchSimpleFinTransactions } from '../services/simpleFinService';
 
 declare const XLSX: any;
@@ -59,6 +59,9 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
   const [duplicatesToKeep, setDuplicatesToKeep] = useState<Set<string>>(new Set());
   const [unmappedCategories, setUnmappedCategories] = useState<string[]>([]);
   const [categoryMapping, setCategoryMapping] = useState<Record<string, string>>({});
+  
+  // Enhanced Review Tab State
+  const [reviewTab, setReviewTab] = useState<'clean' | 'duplicates'>('clean');
 
   // Filtering & Sorting
   const [filterText, setFilterText] = useState('');
@@ -106,6 +109,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     setImportCandidates({ clean: [], duplicates: [] });
     setDuplicatesToKeep(new Set());
     setUnmappedCategories([]);
+    setReviewTab('clean');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
@@ -196,9 +200,35 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
 
   // --- Import Logic ---
   const handleFileSelect = (file: File) => {
-    // Reset any previous import state first
     resetImportState();
     
+    // PDF Handling
+    if (file.type === 'application/pdf') {
+        const reader = new FileReader();
+        reader.onloadend = async () => {
+            const result = reader.result as string;
+            // Robust base64 extraction
+            const base64 = result.includes(',') ? result.split(',')[1] : result;
+            
+            setIsProcessing(true);
+            try {
+                const pdfTxns = await parsePdfStatement(base64);
+                if (pdfTxns.length === 0) {
+                    alert("AI parsed 0 transactions. Ensure the PDF is a readable bank statement.");
+                } else {
+                    // Directly move to duplicate check as PDF is already structured
+                    performDuplicateCheck(pdfTxns, {}, categories);
+                }
+            } catch (err) {
+                console.error("PDF Error", err);
+                alert("Failed to parse PDF statement. It might be password protected or scanned image.");
+            }
+            setIsProcessing(false);
+        };
+        reader.readAsDataURL(file);
+        return;
+    }
+
     if (file.name.endsWith('.csv')) {
       const reader = new FileReader();
       reader.onload = e => processCSV(e.target?.result as string);
@@ -256,19 +286,9 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     setIsProcessing(true);
     try {
       const newTxns = await fetchSimpleFinTransactions(simpleFinUrl);
-      
-      // Basic Duplicate Check for Sync
-      const clean: Transaction[] = [];
-      const dups: Transaction[] = [];
-      newTxns.forEach(nt => {
-        const exists = transactions.some(t => t.id === nt.id || (t.date === nt.date && t.amount === nt.amount && t.description === nt.description));
-        if (exists) dups.push(nt);
-        else clean.push(nt);
-      });
-
-      setImportCandidates({ clean, duplicates: dups });
+      // Move directly to duplicate check
+      performDuplicateCheck(newTxns, {}, categories);
       setShowSimpleFinModal(false);
-      setShowDuplicateReview(true);
     } catch (e) {
       alert("Failed to sync SimpleFin. Check your Bridge URL.");
       console.error(e);
@@ -362,7 +382,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     performDuplicateCheck(importCandidates.clean, categoryMapping, newCats);
   };
 
-  const performDuplicateCheck = (txns: Transaction[], catMap: Record<string, string>, updatedCategories: Category[] = categories) => {
+  const performDuplicateCheck = (txns: Transaction[], catMap: Record<string, string>, updatedCategories: Category[]) => {
     const clean: Transaction[] = [];
     const dups: Transaction[] = [];
 
@@ -380,6 +400,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
 
     setImportCandidates({ clean, duplicates: dups });
     if (showMapper) setShowMapper(false);
+    setReviewTab(clean.length > 0 ? 'clean' : 'duplicates');
     setShowDuplicateReview(true);
   };
 
@@ -577,8 +598,8 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 flex flex-col items-center justify-center hover:bg-gray-50 transition cursor-pointer" onClick={() => fileInputRef.current?.click()}>
             <UploadIcon className="w-6 h-6 text-gray-400 mb-1" />
-            <span className="text-xs font-medium text-gray-600">Upload CSV/Excel</span>
-            <input type="file" ref={fileInputRef} className="hidden" accept=".csv,.xlsx,.xls" onChange={e => e.target.files && handleFileSelect(e.target.files[0])} />
+            <span className="text-xs font-medium text-gray-600 text-center">Upload CSV/Excel<br/>or PDF Statement</span>
+            <input type="file" ref={fileInputRef} className="hidden" accept=".csv,.xlsx,.xls,.pdf" onChange={e => e.target.files && handleFileSelect(e.target.files[0])} />
           </div>
           
           <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 flex flex-col items-center justify-center hover:bg-gray-50 transition cursor-pointer" onClick={() => setShowGSheetModal(true)}>
@@ -818,38 +839,80 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
           </div>
        )}
 
-       {/* Duplicate Review Modal */}
+       {/* Review & Import Modal */}
        {showDuplicateReview && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[600px] shadow-2xl max-h-[80vh] overflow-y-auto">
-                <div className="flex items-center gap-2 mb-4">
-                   <AlertIcon className="w-6 h-6 text-orange-500" />
-                   <h3 className="font-bold text-lg">Review Duplicates</h3>
+             <div className="bg-white p-6 rounded-xl w-[700px] shadow-2xl max-h-[80vh] flex flex-col">
+                <div className="flex items-center gap-2 mb-4 border-b pb-4">
+                   <CheckIcon className="w-6 h-6 text-green-500" />
+                   <h3 className="font-bold text-lg">Review & Import</h3>
                 </div>
-                <p className="text-sm text-gray-600 mb-4">We found {importCandidates.duplicates.length} potential duplicates. Uncheck items you want to discard.</p>
-                
-                <div className="space-y-2 mb-4">
-                   {importCandidates.duplicates.map(d => (
-                      <div key={d.id} className="flex items-center gap-3 p-2 border rounded bg-orange-50">
-                         <input type="checkbox" checked={duplicatesToKeep.has(d.id)} onChange={e => {
-                            const newSet = new Set(duplicatesToKeep);
-                            if (e.target.checked) newSet.add(d.id); else newSet.delete(d.id);
-                            setDuplicatesToKeep(newSet);
-                         }} />
-                         <div className="flex-1 text-xs">
-                            <div className="font-bold">{d.date.split('T')[0]} - ${d.amount}</div>
-                            <div className="truncate">{d.description}</div>
-                         </div>
-                         <div className="text-xs text-orange-600 font-bold">Duplicate</div>
-                      </div>
-                   ))}
-                </div>
-                
-                <p className="text-sm text-gray-600 mb-4">{importCandidates.clean.length} new clean transactions will be added.</p>
 
-                <div className="flex gap-2">
-                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={finalizeImport} className="flex-1 py-2 bg-success text-white rounded">Import Transactions</button>
+                {/* Tabs */}
+                <div className="flex gap-2 mb-4 border-b">
+                   <button 
+                     className={`px-4 py-2 text-sm font-medium border-b-2 ${reviewTab === 'clean' ? 'border-accent text-accent' : 'border-transparent text-gray-500'}`}
+                     onClick={() => setReviewTab('clean')}
+                   >
+                     New Transactions ({importCandidates.clean.length})
+                   </button>
+                   <button 
+                     className={`px-4 py-2 text-sm font-medium border-b-2 ${reviewTab === 'duplicates' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500'}`}
+                     onClick={() => setReviewTab('duplicates')}
+                   >
+                     Potential Duplicates ({importCandidates.duplicates.length})
+                   </button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto min-h-[300px] mb-4">
+                    {reviewTab === 'duplicates' && (
+                       <div className="space-y-2">
+                          {importCandidates.duplicates.length === 0 && <p className="text-center text-gray-400 py-8">No duplicates found.</p>}
+                          {importCandidates.duplicates.map(d => (
+                              <div key={d.id} className="flex items-center gap-3 p-2 border rounded bg-orange-50">
+                                <input type="checkbox" checked={duplicatesToKeep.has(d.id)} onChange={e => {
+                                    const newSet = new Set(duplicatesToKeep);
+                                    if (e.target.checked) newSet.add(d.id); else newSet.delete(d.id);
+                                    setDuplicatesToKeep(newSet);
+                                }} />
+                                <div className="flex-1 text-xs">
+                                    <div className="font-bold">{d.date.split('T')[0]} - ${d.amount}</div>
+                                    <div className="truncate">{d.description}</div>
+                                </div>
+                                <div className="text-xs text-orange-600 font-bold">Duplicate</div>
+                              </div>
+                          ))}
+                       </div>
+                    )}
+
+                    {reviewTab === 'clean' && (
+                       <div className="space-y-2">
+                          {importCandidates.clean.length === 0 && <p className="text-center text-gray-400 py-8">No new transactions.</p>}
+                          {importCandidates.clean.map((t, idx) => (
+                             <div key={t.id} className="flex items-center justify-between p-2 border rounded bg-gray-50 hover:bg-white text-xs">
+                                <div className="flex gap-3 overflow-hidden">
+                                   <div className="text-gray-500 w-6 font-bold">{idx + 1}.</div>
+                                   <div className="w-20">{t.date.split('T')[0]}</div>
+                                   <div className="font-medium truncate flex-1">{t.description}</div>
+                                   <div className="font-bold">${t.amount.toFixed(2)}</div>
+                                </div>
+                                <button 
+                                  onClick={() => setImportCandidates(prev => ({ ...prev, clean: prev.clean.filter(c => c.id !== t.id) }))} 
+                                  className="text-gray-400 hover:text-red-500"
+                                >
+                                  <TrashIcon className="w-4 h-4" />
+                                </button>
+                             </div>
+                          ))}
+                       </div>
+                    )}
+                </div>
+
+                <div className="flex gap-2 pt-4 border-t">
+                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded hover:bg-gray-200">Cancel</button>
+                   <button onClick={finalizeImport} className="flex-1 py-2 bg-success text-white rounded hover:bg-green-600 shadow">
+                      Import {importCandidates.clean.length + duplicatesToKeep.size} Transactions
+                   </button>
                 </div>
              </div>
           </div>
@@ -949,7 +1012,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
                                <div className="flex gap-4 text-sm">
                                   <label className="flex items-center gap-1"><input type="radio" name="logic" checked={activeRule.matchLogic === 'AND'} onChange={() => setActiveRule({...activeRule, matchLogic: 'AND'})} /> All conditions (AND)</label>
                                   <label className="flex items-center gap-1"><input type="radio" name="logic" checked={activeRule.matchLogic === 'OR'} onChange={() => setActiveRule({...activeRule, matchLogic: 'OR'})} /> Any condition (OR)</label>
-                               </div>
+                                </div>
                             </div>
 
                             <div className="bg-gray-50 p-3 rounded border">

@@ -1,3 +1,4 @@
+
 export enum TransactionType {
   INCOME = 'INCOME',
   EXPENSE = 'EXPENSE',
@@ -39,7 +40,20 @@ export interface ReconciliationOrder {
   date: string;
   description: string;
   amount: number;
+  orderStatus?: string;
+  paymentAccount?: string;
+  category?: string; // e.g. Amazon Category
+  itemDetails?: string;
   matchedTransactionId?: string;
+}
+
+export interface ReconciliationMatchSuggestion {
+  type: 'EXACT' | 'BUNDLE' | 'SEMANTIC' | 'DISCREPANCY';
+  transactionId: string;
+  orderIds: string[];
+  confidence: number;
+  reason: string;
+  discrepancyAmount?: number;
 }
 
 export interface DateRange {
