@@ -5,3 +5,4 @@ dist
 Dockerfile
 cloudbuild.yaml
 README.md
+service-account.json
