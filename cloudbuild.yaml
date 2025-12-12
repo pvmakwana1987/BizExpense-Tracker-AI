@@ -1,0 +1,25 @@
+steps:
+  # 1. Build the container image using your Dockerfile
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/biz-expense-tracker', '.']
+
+  # 2. Push the image to Google Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/biz-expense-tracker']
+
+  # 3. Deploy the image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'biz-expense-tracker'
+      - '--image'
+      - 'gcr.io/$PROJECT_ID/biz-expense-tracker'
+      - '--region'
+      - 'us-central1'
+      - '--allow-unauthenticated'
+
+# THIS IS THE FIX FOR YOUR ERROR:
+options:
+  logging: CLOUD_LOGGING_ONLY
