@@ -33,6 +33,7 @@ export interface Transaction {
   merchant?: string; // Normalized merchant name (AI)
   isAnomaly?: boolean; // Flagged by AI
   anomalyReason?: string; // Reason for flag
+  importedCategory?: string; // Raw category from import file
 }
 
 export interface ReconciliationOrder {

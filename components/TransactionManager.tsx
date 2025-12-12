@@ -29,6 +29,57 @@ const DEFAULT_WIDTHS = {
   actions: 60
 };
 
+// Levenshtein distance for fuzzy matching
+const levenshteinDistance = (s: string, t: string) => {
+  if (!s.length) return t.length;
+  if (!t.length) return s.length;
+  const arr = [];
+  for (let i = 0; i <= t.length; i++) {
+    arr[i] = [i];
+    for (let j = 1; j <= s.length; j++) {
+      arr[i][j] =
+        i === 0
+          ? j
+          : Math.min(
+              arr[i - 1][j] + 1,
+              arr[i][j - 1] + 1,
+              arr[i - 1][j - 1] + (s[j - 1] === t[i - 1] ? 0 : 1)
+            );
+    }
+  }
+  return arr[t.length][s.length];
+};
+
+const getClosestMatch = (term: string, categories: Category[]) => {
+  const minDist = 3; // Tolerance for typos
+  let bestId = null;
+  let lowest = Infinity;
+  
+  const termLower = term.toLowerCase();
+
+  const compare = (id: string, name: string) => {
+     const dist = levenshteinDistance(termLower, name.toLowerCase());
+     if (dist < lowest && dist <= minDist) {
+        lowest = dist;
+        bestId = id;
+     }
+  };
+
+  categories.forEach(c => {
+     compare(c.id, c.name);
+     c.subcategories.forEach(s => compare(s.id, s.name));
+  });
+
+  return bestId;
+};
+
+// Helper to find common prefix
+const getCommonPrefix = (s1: string, s2: string) => {
+    let i = 0;
+    while(i < s1.length && i < s2.length && s1[i].toLowerCase() === s2[i].toLowerCase()) i++;
+    return s1.substring(0, i).trim();
+}
+
 const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, setTransactions, categories, setCategories, rules, setRules }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -52,12 +103,16 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
 
   // Import State
   const [importPreview, setImportPreview] = useState<string[][] | null>(null);
-  const [columnMapping, setColumnMapping] = useState({ date: 0, description: 1, amount: 2, category: -1, account: -1, debit: -1, credit: -1 });
+  const [columnMapping, setColumnMapping] = useState({ 
+    date: 0, description: 1, amount: 2, category: -1, account: -1, debit: -1, credit: -1, comments: -1 
+  });
   const [importAccountName, setImportAccountName] = useState('My Bank Account');
   const [useSplitMode, setUseSplitMode] = useState(false);
   const [importCandidates, setImportCandidates] = useState<{ clean: Transaction[], duplicates: Transaction[] }>({ clean: [], duplicates: [] });
   const [duplicatesToKeep, setDuplicatesToKeep] = useState<Set<string>>(new Set());
-  const [unmappedCategories, setUnmappedCategories] = useState<string[]>([]);
+  
+  // Unmapped categories logic
+  const [unmappedCategories, setUnmappedCategories] = useState<{name: string, suggestion?: string}[]>([]);
   const [categoryMapping, setCategoryMapping] = useState<Record<string, string>>({});
   
   // Enhanced Review Tab State
@@ -76,8 +131,9 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
   // Bulk Edit
   const [bulkCategorySelect, setBulkCategorySelect] = useState<string>('');
 
-  // Rules
+  // Rules & Learning
   const [activeRule, setActiveRule] = useState<Partial<AutoCategoryRule> | null>(null);
+  const [ruleSuggestion, setRuleSuggestion] = useState<{condition: string, categoryId: string, subcategoryId?: string} | null>(null);
   
   // External Services
   const [simpleFinUrl, setSimpleFinUrl] = useState('');
@@ -132,6 +188,16 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     resizingCol.current = null;
     document.removeEventListener('mousemove', handleResizeMove);
     document.removeEventListener('mouseup', handleResizeEnd);
+  };
+
+  const getCategoryName = (catId: string, subId?: string) => {
+      const cat = categories.find(c => c.id === catId);
+      if (!cat) return 'Unknown';
+      if (subId) {
+          const sub = cat.subcategories.find(s => s.id === subId);
+          return sub ? `${cat.name} > ${sub.name}` : cat.name;
+      }
+      return cat.name;
   };
 
   // --- AI Features ---
@@ -309,6 +375,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
       let desc = row[columnMapping.description] || "Imported Transaction";
       let amount = 0;
       let type = TransactionType.EXPENSE;
+      let comment = columnMapping.comments > -1 ? row[columnMapping.comments] : '';
 
       if (useSplitMode) {
         const debit = parseFloat(row[columnMapping.debit]?.replace(/[^0-9.-]/g, '') || '0');
@@ -326,9 +393,10 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
       const acc = columnMapping.account > -1 ? row[columnMapping.account] : importAccountName;
 
       // Category extraction
+      let importedCat = undefined;
       if (columnMapping.category > -1) {
-        const catName = row[columnMapping.category]?.trim();
-        if (catName) foundCategories.add(catName);
+        importedCat = row[columnMapping.category]?.trim();
+        if (importedCat) foundCategories.add(importedCat);
       }
 
       newTxns.push({
@@ -338,17 +406,35 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
         amount,
         type,
         account: acc,
-        originalText: desc
+        originalText: desc,
+        comments: comment,
+        importedCategory: importedCat
       });
     });
 
-    // Check Categories
-    const unknownCats = Array.from(foundCategories).filter(c => !categories.some(cat => cat.name.toLowerCase() === c.toLowerCase() || cat.subcategories.some(s => s.name.toLowerCase() === c.toLowerCase())));
+    // Check Categories & Fuzzy Match
+    const uniqueCats = Array.from(foundCategories);
+    const unmapped: {name: string, suggestion?: string}[] = [];
+    const mappingUpdates: Record<string, string> = {};
+
+    uniqueCats.forEach(catName => {
+        // 1. Exact match
+        const exact = categories.find(c => c.name.toLowerCase() === catName.toLowerCase() || c.subcategories.some(s => s.name.toLowerCase() === catName.toLowerCase()));
+        
+        if (!exact) {
+           // 2. Fuzzy match
+           const suggestionId = getClosestMatch(catName, categories);
+           unmapped.push({ name: catName, suggestion: suggestionId || undefined });
+           if (suggestionId) mappingUpdates[catName] = suggestionId;
+           else mappingUpdates[catName] = 'NEW';
+        }
+    });
     
     setImportCandidates({ clean: newTxns, duplicates: [] }); // Temp store
 
-    if (unknownCats.length > 0) {
-      setUnmappedCategories(unknownCats);
+    if (unmapped.length > 0) {
+      setUnmappedCategories(unmapped);
+      setCategoryMapping(mappingUpdates);
       setShowMapper(false);
       setShowCategoryMapper(true);
     } else {
@@ -362,12 +448,12 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     const newCats = [...categories];
     
     unmappedCategories.forEach(uc => {
-       const mapped = categoryMapping[uc];
+       const mapped = categoryMapping[uc.name];
        if (!mapped || mapped === 'NEW') {
          // Create new
          newCats.push({
-           id: `cat-auto-${Date.now()}-${uc.replace(/\s/g, '')}`,
-           name: uc,
+           id: `cat-auto-${Date.now()}-${uc.name.replace(/\s/g, '')}`,
+           name: uc.name,
            type: TransactionType.EXPENSE, // Default, user can change later
            subcategories: [],
            color: '#94a3b8'
@@ -387,6 +473,43 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     const dups: Transaction[] = [];
 
     txns.forEach(t => {
+      // Resolve Category
+      let finalCatId: string | undefined = undefined;
+      let finalSubId: string | undefined = undefined;
+      let finalType = t.type;
+
+      if (t.importedCategory) {
+          // Check if explicit map exists
+          const mapId = catMap[t.importedCategory];
+          if (mapId && mapId !== 'NEW') {
+              // Can be category ID or subcategory ID
+              const cat = updatedCategories.find(c => c.id === mapId);
+              if (cat) {
+                  finalCatId = cat.id;
+                  finalType = cat.type;
+              } else {
+                  // Might be subcategory
+                  updatedCategories.forEach(c => {
+                      const sub = c.subcategories.find(s => s.id === mapId);
+                      if (sub) {
+                          finalCatId = c.id;
+                          finalSubId = sub.id;
+                          finalType = c.type;
+                      }
+                  });
+              }
+          } else {
+              // Check for direct match in updated categories (including newly created ones)
+              const exact = updatedCategories.find(c => c.name.toLowerCase() === t.importedCategory!.toLowerCase());
+              if (exact) {
+                  finalCatId = exact.id;
+                  finalType = exact.type;
+              }
+          }
+      }
+
+      const updatedT = { ...t, categoryId: finalCatId, subcategoryId: finalSubId, type: finalType };
+
       // Basic check: same date, amount, description
       const isDup = transactions.some(exist => 
         exist.date.split('T')[0] === t.date.split('T')[0] && 
@@ -394,8 +517,8 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
         exist.description === t.description
       );
 
-      if (isDup) dups.push(t);
-      else clean.push(t);
+      if (isDup) dups.push(updatedT);
+      else clean.push(updatedT);
     });
 
     setImportCandidates({ clean, duplicates: dups });
@@ -439,8 +562,64 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
 
     if (catId) {
         const cat = categories.find(c => c.id === catId);
+        const currentTxn = transactions.find(t => t.id === transactionId);
+        
+        // Update transaction
         setTransactions(prev => prev.map(t => t.id === transactionId ? { ...t, categoryId: catId, subcategoryId: subId, type: cat!.type } : t));
+
+        // Rule Learning: Check if we should suggest a rule
+        if (currentTxn) {
+            checkRuleOpportunity(currentTxn, catId, subId);
+        }
     }
+  };
+
+  const checkRuleOpportunity = (currentTxn: Transaction, targetCatId: string, targetSubId?: string) => {
+      // Find others in this category (excluding self)
+      const others = transactions.filter(t => t.id !== currentTxn.id && t.categoryId === targetCatId);
+      
+      // Look for a similar transaction to form a pattern
+      for (const other of others) {
+          // Check common prefix
+          const prefix = getCommonPrefix(currentTxn.description, other.description);
+          
+          // Rule heuristic: Common prefix > 3 chars and is not just numbers
+          if (prefix.length >= 4 && isNaN(Number(prefix))) {
+               // Check if rule already exists to avoid nagging
+               const alreadyExists = rules.some(r => 
+                   r.targetCategoryId === targetCatId && 
+                   r.conditions.some(c => c.value.toLowerCase() === prefix.toLowerCase())
+               );
+               
+               if (!alreadyExists) {
+                   setRuleSuggestion({
+                       condition: prefix,
+                       categoryId: targetCatId,
+                       subcategoryId: targetSubId
+                   });
+                   return; // Stop after finding one suggestion
+               }
+          }
+      }
+  };
+
+  const acceptRuleSuggestion = () => {
+      if (!ruleSuggestion) return;
+      setActiveRule({
+          name: `Auto: "${ruleSuggestion.condition}"`,
+          matchLogic: 'AND',
+          isActive: true,
+          targetCategoryId: ruleSuggestion.categoryId,
+          targetSubcategoryId: ruleSuggestion.subcategoryId,
+          conditions: [{
+              id: Date.now().toString(),
+              field: 'description',
+              operator: 'starts_with', 
+              value: ruleSuggestion.condition
+          }]
+      });
+      setShowRulesModal(true);
+      setRuleSuggestion(null);
   };
 
   const getUnifiedValue = (t: Transaction) => {
@@ -515,6 +694,11 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
          setTransactions(prev => prev.map(t => selectedIds.has(t.id) ? { ...t, categoryId: catId, subcategoryId: subId, type: cat!.type } : t));
          setSelectedIds(new Set());
          setBulkCategorySelect('');
+         
+         // Trigger learning from first item in bulk
+         const firstId = Array.from(selectedIds)[0];
+         const t = transactions.find(tx => tx.id === firstId);
+         if (t) checkRuleOpportunity(t, catId, subId);
      }
   };
 
@@ -592,8 +776,12 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
     setActiveRule(null);
   };
 
+  const deleteRule = (id: string) => {
+    setRules(prev => prev.filter(r => r.id !== id));
+  };
+
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div className="space-y-6 animate-fade-in relative">
        {/* Actions Bar */}
        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
           <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 flex flex-col items-center justify-center hover:bg-gray-50 transition cursor-pointer" onClick={() => fileInputRef.current?.click()}>
@@ -722,6 +910,26 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
          </table>
        </div>
 
+       {/* Rule Suggestion Banner */}
+       {ruleSuggestion && (
+         <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-6 py-4 rounded-xl shadow-2xl z-50 flex items-center gap-4 animate-fade-in-up border border-gray-700">
+           <div className="bg-purple-900/50 p-2 rounded-full border border-purple-500"><SparklesIcon className="w-5 h-5 text-purple-300" /></div>
+           <div>
+             <h4 className="font-bold text-sm">Automate this?</h4>
+             <p className="text-xs text-gray-300">
+                Found similar transactions. Create rule:<br/> 
+                <span className="text-white font-mono bg-gray-800 px-1 rounded">Starts with "{ruleSuggestion.condition}"</span> 
+                {' '}→{' '} 
+                <span className="text-accent font-bold">{getCategoryName(ruleSuggestion.categoryId, ruleSuggestion.subcategoryId)}</span>
+             </p>
+           </div>
+           <div className="flex gap-2 ml-4">
+             <button onClick={() => setRuleSuggestion(null)} className="px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white hover:bg-white/10 rounded">Ignore</button>
+             <button onClick={acceptRuleSuggestion} className="px-3 py-1.5 text-xs font-bold bg-accent text-white rounded hover:bg-blue-600 shadow-lg shadow-blue-900/50">Create Rule</button>
+           </div>
+         </div>
+       )}
+
        {/* --- MODALS --- */}
 
        {/* Manual Add Modal */}
@@ -774,6 +982,7 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
                                else if (!useSplitMode && j === columnMapping.amount) bgClass = "bg-green-100 border-green-200";
                                else if (useSplitMode && j === columnMapping.debit) bgClass = "bg-red-50 border-red-200";
                                else if (useSplitMode && j === columnMapping.credit) bgClass = "bg-green-50 border-green-200";
+                               else if (j === columnMapping.comments) bgClass = "bg-gray-200 border-gray-300";
                                
                                return <td key={j} className={`border px-1 max-w-[100px] truncate ${bgClass}`}>{cell}</td>
                             })}
@@ -809,108 +1018,156 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
                            <label className="text-xs font-bold text-red-800">Debit (Expense) Column</label>
                            <input type="number" className="w-full border rounded p-1" value={columnMapping.debit} onChange={e => setColumnMapping({...columnMapping, debit: parseInt(e.target.value)})} />
                         </div>
-                        <div className="p-2 border-l-4 border-green-400 bg-gray-50 rounded">
+                        <div className="p-2 border-l-4 border-green-400 bg-green-50 rounded">
                            <label className="text-xs font-bold text-green-800">Credit (Income) Column</label>
                            <input type="number" className="w-full border rounded p-1" value={columnMapping.credit} onChange={e => setColumnMapping({...columnMapping, credit: parseInt(e.target.value)})} />
                         </div>
                       </>
                     )}
-                    <div className="p-2 border-l-4 border-gray-400 bg-gray-50 rounded">
-                       <label className="text-xs font-bold text-gray-800">Category (Optional)</label>
-                       <input type="number" className="w-full border rounded p-1" value={columnMapping.category} onChange={e => setColumnMapping({...columnMapping, category: parseInt(e.target.value)})} />
+                    <div className="p-2 border-l-4 border-purple-400 bg-gray-50 rounded">
+                        <label className="text-xs font-bold text-purple-800">Category (Optional)</label>
+                        <input type="number" className="w-full border rounded p-1" value={columnMapping.category} onChange={e => setColumnMapping({...columnMapping, category: parseInt(e.target.value)})} />
                     </div>
                     <div className="p-2 border-l-4 border-gray-400 bg-gray-50 rounded">
-                       <label className="text-xs font-bold text-gray-800">Account (Optional)</label>
-                       <input type="number" className="w-full border rounded p-1" value={columnMapping.account} onChange={e => setColumnMapping({...columnMapping, account: parseInt(e.target.value)})} />
+                        <label className="text-xs font-bold text-gray-800">Comments (Optional)</label>
+                        <input type="number" className="w-full border rounded p-1" value={columnMapping.comments} onChange={e => setColumnMapping({...columnMapping, comments: parseInt(e.target.value)})} />
+                    </div>
+                    <div className="p-2 bg-gray-50 rounded">
+                        <label className="text-xs font-bold text-gray-600">Account Name (for this batch)</label>
+                        <input type="text" className="w-full border rounded p-1" value={importAccountName} onChange={e => setImportAccountName(e.target.value)} />
                     </div>
                   </div>
                   
-                  <div className="p-2 bg-gray-50 rounded">
-                     <label className="text-xs font-bold">Default Account Name</label>
-                     <input type="text" className="w-full border rounded p-1" value={importAccountName} onChange={e => setImportAccountName(e.target.value)} />
+                  <div className="flex gap-2 pt-4">
+                     <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded text-gray-700 font-medium">Cancel Import</button>
+                     <button onClick={handleProcessImport} className="flex-1 py-2 bg-accent text-white rounded font-bold shadow-md hover:bg-blue-600">Process & Preview</button>
                   </div>
                 </div>
-
-                <div className="flex gap-2 mt-6">
-                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded hover:bg-gray-200">Cancel</button>
-                   <button onClick={handleProcessImport} className="flex-1 py-2 bg-accent text-white rounded hover:bg-blue-600">Next</button>
-                </div>
              </div>
+          </div>
+       )}
+
+       {/* Category Mapping Modal (For Fuzzy Match) */}
+       {showCategoryMapper && unmappedCategories.length > 0 && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+              <div className="bg-white p-6 rounded-xl w-[600px] shadow-2xl max-h-[80vh] overflow-y-auto">
+                  <h3 className="font-bold text-lg mb-2">Map Unknown Categories</h3>
+                  <p className="text-sm text-gray-500 mb-4">We found categories in your file that don't match your existing ones. Please map them.</p>
+                  
+                  <div className="space-y-3">
+                      {unmappedCategories.map((uc, i) => (
+                          <div key={i} className="flex items-center gap-3 p-3 bg-gray-50 rounded border">
+                              <div className="flex-1">
+                                  <div className="text-xs font-bold text-gray-500 uppercase">Imported As</div>
+                                  <div className="font-bold text-gray-800">{uc.name}</div>
+                                  {uc.suggestion && (
+                                     <div className="text-xs text-green-600 mt-1 flex items-center gap-1">
+                                        <SparklesIcon className="w-3 h-3" /> 
+                                        Suggestion: <span className="font-bold">{getCategoryName(uc.suggestion)}</span>
+                                     </div>
+                                  )}
+                              </div>
+                              <div className="text-gray-400">→</div>
+                              <div className="flex-1">
+                                  <select 
+                                     className="w-full text-sm border-gray-300 rounded focus:ring-accent"
+                                     value={categoryMapping[uc.name] || (uc.suggestion || 'NEW')}
+                                     onChange={(e) => setCategoryMapping({...categoryMapping, [uc.name]: e.target.value})}
+                                  >
+                                      <option value="NEW" className="font-bold text-green-600">+ Create as New</option>
+                                      {renderCategoryOptions()}
+                                  </select>
+                              </div>
+                          </div>
+                      ))}
+                  </div>
+
+                  <div className="mt-6 flex justify-end gap-3">
+                      <button onClick={resetImportState} className="px-4 py-2 text-gray-500 hover:text-gray-700">Cancel</button>
+                      <button onClick={handleCategoryMapConfirm} className="px-6 py-2 bg-accent text-white rounded shadow hover:bg-blue-600 font-medium">Continue</button>
+                  </div>
+              </div>
           </div>
        )}
 
        {/* Review & Import Modal */}
        {showDuplicateReview && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[700px] shadow-2xl max-h-[80vh] flex flex-col">
-                <div className="flex items-center gap-2 mb-4 border-b pb-4">
-                   <CheckIcon className="w-6 h-6 text-green-500" />
-                   <h3 className="font-bold text-lg">Review & Import</h3>
-                </div>
-
-                {/* Tabs */}
-                <div className="flex gap-2 mb-4 border-b">
-                   <button 
-                     className={`px-4 py-2 text-sm font-medium border-b-2 ${reviewTab === 'clean' ? 'border-accent text-accent' : 'border-transparent text-gray-500'}`}
-                     onClick={() => setReviewTab('clean')}
-                   >
-                     New Transactions ({importCandidates.clean.length})
-                   </button>
-                   <button 
-                     className={`px-4 py-2 text-sm font-medium border-b-2 ${reviewTab === 'duplicates' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500'}`}
-                     onClick={() => setReviewTab('duplicates')}
-                   >
-                     Potential Duplicates ({importCandidates.duplicates.length})
-                   </button>
-                </div>
+             <div className="bg-white p-6 rounded-xl w-[800px] shadow-2xl max-h-[90vh] overflow-y-auto">
+                <h3 className="font-bold mb-4 text-xl">Review & Import</h3>
                 
-                <div className="flex-1 overflow-y-auto min-h-[300px] mb-4">
-                    {reviewTab === 'duplicates' && (
-                       <div className="space-y-2">
-                          {importCandidates.duplicates.length === 0 && <p className="text-center text-gray-400 py-8">No duplicates found.</p>}
-                          {importCandidates.duplicates.map(d => (
-                              <div key={d.id} className="flex items-center gap-3 p-2 border rounded bg-orange-50">
-                                <input type="checkbox" checked={duplicatesToKeep.has(d.id)} onChange={e => {
-                                    const newSet = new Set(duplicatesToKeep);
-                                    if (e.target.checked) newSet.add(d.id); else newSet.delete(d.id);
-                                    setDuplicatesToKeep(newSet);
-                                }} />
-                                <div className="flex-1 text-xs">
-                                    <div className="font-bold">{d.date.split('T')[0]} - ${d.amount}</div>
-                                    <div className="truncate">{d.description}</div>
-                                </div>
-                                <div className="text-xs text-orange-600 font-bold">Duplicate</div>
-                              </div>
-                          ))}
-                       </div>
-                    )}
-
-                    {reviewTab === 'clean' && (
-                       <div className="space-y-2">
-                          {importCandidates.clean.length === 0 && <p className="text-center text-gray-400 py-8">No new transactions.</p>}
-                          {importCandidates.clean.map((t, idx) => (
-                             <div key={t.id} className="flex items-center justify-between p-2 border rounded bg-gray-50 hover:bg-white text-xs">
-                                <div className="flex gap-3 overflow-hidden">
-                                   <div className="text-gray-500 w-6 font-bold">{idx + 1}.</div>
-                                   <div className="w-20">{t.date.split('T')[0]}</div>
-                                   <div className="font-medium truncate flex-1">{t.description}</div>
-                                   <div className="font-bold">${t.amount.toFixed(2)}</div>
-                                </div>
-                                <button 
-                                  onClick={() => setImportCandidates(prev => ({ ...prev, clean: prev.clean.filter(c => c.id !== t.id) }))} 
-                                  className="text-gray-400 hover:text-red-500"
-                                >
-                                  <TrashIcon className="w-4 h-4" />
-                                </button>
-                             </div>
-                          ))}
-                       </div>
-                    )}
+                <div className="flex gap-4 border-b mb-4">
+                    <button 
+                        className={`pb-2 px-4 font-medium text-sm ${reviewTab === 'clean' ? 'border-b-2 border-accent text-accent' : 'text-gray-500'}`}
+                        onClick={() => setReviewTab('clean')}
+                    >
+                        New Transactions ({importCandidates.clean.length})
+                    </button>
+                    <button 
+                        className={`pb-2 px-4 font-medium text-sm ${reviewTab === 'duplicates' ? 'border-b-2 border-accent text-accent' : 'text-gray-500'}`}
+                        onClick={() => setReviewTab('duplicates')}
+                    >
+                        Potential Duplicates ({importCandidates.duplicates.length})
+                    </button>
                 </div>
 
-                <div className="flex gap-2 pt-4 border-t">
-                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded hover:bg-gray-200">Cancel</button>
-                   <button onClick={finalizeImport} className="flex-1 py-2 bg-success text-white rounded hover:bg-green-600 shadow">
+                {reviewTab === 'clean' && (
+                    <div className="space-y-2 mb-6">
+                        {importCandidates.clean.length === 0 ? (
+                            <p className="text-gray-500 italic p-4 text-center">No new unique transactions found.</p>
+                        ) : (
+                            importCandidates.clean.map(t => (
+                                <div key={t.id} className="flex justify-between items-center p-3 bg-green-50 rounded border border-green-100">
+                                    <div className="flex-1">
+                                        <div className="text-xs text-green-800 font-bold">{t.date.split('T')[0]}</div>
+                                        <div className="font-medium text-sm">{t.description}</div>
+                                        <div className="text-xs text-gray-500">
+                                            {getCategoryName(t.categoryId || '', t.subcategoryId)}
+                                            {t.comments && <span className="ml-2 italic text-gray-400">Note: {t.comments}</span>}
+                                        </div>
+                                    </div>
+                                    <div className="font-bold text-right mr-4">${t.amount.toFixed(2)}</div>
+                                    <button onClick={() => setImportCandidates(prev => ({...prev, clean: prev.clean.filter(c => c.id !== t.id)}))} className="text-gray-400 hover:text-red-500"><TrashIcon className="w-4 h-4" /></button>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                )}
+
+                {reviewTab === 'duplicates' && (
+                    <div className="space-y-2 mb-6">
+                        <p className="text-xs text-gray-500 mb-2">These match existing records by Date, Amount, and Description. Uncheck to skip them.</p>
+                        {importCandidates.duplicates.length === 0 ? (
+                            <p className="text-gray-500 italic p-4 text-center">No duplicates found.</p>
+                        ) : (
+                            importCandidates.duplicates.map(t => (
+                                <div key={t.id} className="flex justify-between items-center p-3 bg-gray-50 rounded border opacity-75">
+                                    <div className="flex items-center gap-3 flex-1">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={duplicatesToKeep.has(t.id)} 
+                                            onChange={() => {
+                                                const newSet = new Set(duplicatesToKeep);
+                                                if (newSet.has(t.id)) newSet.delete(t.id);
+                                                else newSet.add(t.id);
+                                                setDuplicatesToKeep(newSet);
+                                            }}
+                                        />
+                                        <div>
+                                            <div className="text-xs text-gray-500 font-bold">{t.date.split('T')[0]}</div>
+                                            <div className="font-medium text-sm">{t.description}</div>
+                                        </div>
+                                    </div>
+                                    <div className="font-bold">${t.amount.toFixed(2)}</div>
+                                </div>
+                            ))
+                        )}
+                    </div>
+                )}
+                
+                <div className="flex gap-2 border-t pt-4">
+                   <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded text-gray-700">Cancel</button>
+                   <button onClick={finalizeImport} className="flex-1 py-2 bg-accent text-white rounded font-bold shadow-md hover:bg-blue-600">
                       Import {importCandidates.clean.length + duplicatesToKeep.size} Transactions
                    </button>
                 </div>
@@ -918,32 +1175,108 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
           </div>
        )}
 
-       {/* Unknown Categories Modal */}
-       {showCategoryMapper && (
+       {/* Rule Manager Modal */}
+       {showRulesModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-            <div className="bg-white p-6 rounded-xl w-[500px] shadow-2xl">
-               <h3 className="font-bold mb-4">Map Unknown Categories</h3>
-               <p className="text-sm text-gray-500 mb-4">We found categories in your file that don't exist in your system. Map them to existing ones or create new ones.</p>
-               <div className="space-y-3 max-h-[60vh] overflow-y-auto">
-                  {unmappedCategories.map(cat => (
-                     <div key={cat} className="flex items-center justify-between p-2 border rounded">
-                        <span className="font-bold text-sm">{cat}</span>
-                        <select 
-                           className="text-sm border rounded p-1 w-48" 
-                           value={categoryMapping[cat] || 'NEW'} 
-                           onChange={e => setCategoryMapping(prev => ({...prev, [cat]: e.target.value}))}
-                        >
-                           <option value="NEW">Create New Category</option>
-                           {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                        </select>
-                     </div>
-                  ))}
-               </div>
-               <div className="flex gap-2 mt-4">
-                  <button onClick={resetImportState} className="flex-1 py-2 bg-gray-100 rounded">Cancel Import</button>
-                  <button onClick={handleCategoryMapConfirm} className="flex-1 py-2 bg-accent text-white rounded">Continue</button>
-               </div>
-            </div>
+             <div className="bg-white p-6 rounded-xl w-[700px] shadow-2xl max-h-[85vh] overflow-y-auto">
+                <h3 className="font-bold mb-4 text-lg">Auto-Categorization Rules</h3>
+                
+                <div className="mb-6 border p-4 rounded-lg bg-gray-50">
+                   <h4 className="font-bold text-sm mb-2">{activeRule ? (activeRule.id ? 'Edit Rule' : 'New Rule') : 'Create Rule'}</h4>
+                   <div className="space-y-3">
+                      <input type="text" placeholder="Rule Name (e.g. Uber Rides)" className="w-full border rounded px-2 py-1" value={activeRule?.name || ''} onChange={e => setActiveRule({...activeRule, name: e.target.value})} />
+                      
+                      {/* Conditions Builder */}
+                      <div className="space-y-2">
+                         <div className="text-xs font-bold text-gray-500 uppercase">When...</div>
+                         {(activeRule?.conditions || []).map((c, idx) => (
+                             <div key={idx} className="flex gap-2 items-center">
+                                 <select className="border rounded text-sm p-1" value={c.field} onChange={e => {
+                                     const newConds = [...(activeRule?.conditions || [])];
+                                     newConds[idx].field = e.target.value as RuleField;
+                                     setActiveRule({...activeRule, conditions: newConds});
+                                 }}>
+                                    <option value="description">Description</option>
+                                    <option value="amount">Amount</option>
+                                    <option value="account">Account</option>
+                                 </select>
+                                 <select className="border rounded text-sm p-1" value={c.operator} onChange={e => {
+                                     const newConds = [...(activeRule?.conditions || [])];
+                                     newConds[idx].operator = e.target.value as RuleOperator;
+                                     setActiveRule({...activeRule, conditions: newConds});
+                                 }}>
+                                    <option value="contains">Contains</option>
+                                    <option value="equals">Equals</option>
+                                    <option value="starts_with">Starts With</option>
+                                    <option value="ends_with">Ends With</option>
+                                    <option value="greater">Greater Than</option>
+                                    <option value="less">Less Than</option>
+                                 </select>
+                                 <input type="text" className="border rounded text-sm p-1 flex-1" value={c.value} onChange={e => {
+                                     const newConds = [...(activeRule?.conditions || [])];
+                                     newConds[idx].value = e.target.value;
+                                     setActiveRule({...activeRule, conditions: newConds});
+                                 }} />
+                                 <button onClick={() => {
+                                     const newConds = (activeRule?.conditions || []).filter((_, i) => i !== idx);
+                                     setActiveRule({...activeRule, conditions: newConds});
+                                 }} className="text-red-500 hover:text-red-700">&times;</button>
+                             </div>
+                         ))}
+                         <button onClick={() => {
+                             const newConds = [...(activeRule?.conditions || []), { id: Date.now().toString(), field: 'description' as RuleField, operator: 'contains' as RuleOperator, value: '' }];
+                             setActiveRule({...activeRule, conditions: newConds});
+                         }} className="text-xs text-accent font-medium hover:underline">+ Add Condition</button>
+                      </div>
+
+                      <div className="text-xs font-bold text-gray-500 uppercase mt-2">Then Assign To...</div>
+                      <select className="w-full border rounded px-2 py-1" value={activeRule?.targetSubcategoryId || activeRule?.targetCategoryId || ''} onChange={e => {
+                          const val = e.target.value;
+                          const cat = categories.find(c => c.id === val);
+                          if (cat) setActiveRule({...activeRule, targetCategoryId: cat.id, targetSubcategoryId: undefined});
+                          else {
+                              categories.forEach(c => {
+                                  const sub = c.subcategories.find(s => s.id === val);
+                                  if (sub) setActiveRule({...activeRule, targetCategoryId: c.id, targetSubcategoryId: sub.id});
+                              });
+                          }
+                      }}>
+                          <option value="">-- Select Category --</option>
+                          {renderCategoryOptions()}
+                      </select>
+
+                      <div className="flex justify-end gap-2 pt-2">
+                          <button onClick={() => setActiveRule(null)} className="px-3 py-1 bg-white border rounded text-xs">Clear</button>
+                          <button onClick={saveRule} className="px-3 py-1 bg-accent text-white rounded text-xs font-bold">Save Rule</button>
+                      </div>
+                   </div>
+                </div>
+
+                {/* Existing Rules List */}
+                <h4 className="font-bold text-sm mb-2 text-gray-700">Existing Rules</h4>
+                <div className="space-y-2">
+                    {rules.length === 0 && <p className="text-gray-400 italic text-sm">No rules defined.</p>}
+                    {rules.map(rule => (
+                        <div key={rule.id} className="border rounded p-3 flex justify-between items-center bg-gray-50 hover:bg-white transition">
+                            <div>
+                                <div className="font-bold text-sm">{rule.name}</div>
+                                <div className="text-xs text-gray-500">
+                                    IF {rule.conditions.map(c => `${c.field} ${c.operator} "${c.value}"`).join(rule.matchLogic === 'AND' ? ' AND ' : ' OR ')}
+                                    {' '}→ <span className="text-accent font-medium">{getCategoryName(rule.targetCategoryId, rule.targetSubcategoryId)}</span>
+                                </div>
+                            </div>
+                            <div className="flex gap-2">
+                                <button onClick={() => setActiveRule(rule)} className="text-blue-500 hover:underline text-xs">Edit</button>
+                                <button onClick={() => deleteRule(rule.id)} className="text-red-500 hover:underline text-xs">Delete</button>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="mt-6 text-right">
+                    <button onClick={() => setShowRulesModal(false)} className="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300">Close</button>
+                </div>
+             </div>
           </div>
        )}
 
@@ -951,12 +1284,12 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        {showGSheetModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
              <div className="bg-white p-6 rounded-xl w-96 shadow-2xl">
-                <h3 className="font-bold mb-4 flex items-center gap-2"><GoogleSheetIcon className="w-5 h-5 text-green-600" /> Import Google Sheet</h3>
-                <p className="text-xs text-gray-500 mb-4">Ensure your sheet is "Published to the web" (File {'>'} Share {'>'} Publish to web) and select CSV format, or use a public link.</p>
-                <input type="text" placeholder="Paste Google Sheet URL" className="w-full border rounded px-3 py-2 mb-4" value={gsheetUrl} onChange={e => setGsheetUrl(e.target.value)} />
+                <h3 className="font-bold mb-4">Import from Google Sheets</h3>
+                <p className="text-xs text-gray-500 mb-4">Paste the link to a public or shared Google Sheet.</p>
+                <input type="text" placeholder="https://docs.google.com/spreadsheets/d/..." className="w-full border rounded px-3 py-2 mb-4" value={gsheetUrl} onChange={e => setGsheetUrl(e.target.value)} />
                 <div className="flex gap-2">
                    <button onClick={() => setShowGSheetModal(false)} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={fetchGoogleSheet} className="flex-1 py-2 bg-green-600 text-white rounded">Fetch Data</button>
+                   <button onClick={fetchGoogleSheet} className="flex-1 py-2 bg-accent text-white rounded">Fetch</button>
                 </div>
              </div>
           </div>
@@ -966,121 +1299,16 @@ const TransactionManager: React.FC<TransactionManagerProps> = ({ transactions, s
        {showSimpleFinModal && (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
              <div className="bg-white p-6 rounded-xl w-96 shadow-2xl">
-                <h3 className="font-bold mb-4 flex items-center gap-2"><BankIcon className="w-5 h-5 text-accent" /> Sync with SimpleFin</h3>
-                <p className="text-xs text-gray-500 mb-4">Enter your SimpleFin Bridge URL. This URL contains your credentials securely.</p>
-                <input type="password" placeholder="https://user:pass@bridge.simplefin.org/..." className="w-full border rounded px-3 py-2 mb-4" value={simpleFinUrl} onChange={e => setSimpleFinUrl(e.target.value)} />
+                <h3 className="font-bold mb-4">Sync with SimpleFin</h3>
+                <p className="text-xs text-gray-500 mb-4">Enter your SimpleFin Bridge URL to sync accounts.</p>
+                <input type="text" placeholder="https://user:pass@bridge.simplefin.org/..." className="w-full border rounded px-3 py-2 mb-4" value={simpleFinUrl} onChange={e => setSimpleFinUrl(e.target.value)} />
                 <div className="flex gap-2">
                    <button onClick={() => setShowSimpleFinModal(false)} className="flex-1 py-2 bg-gray-100 rounded">Cancel</button>
-                   <button onClick={syncSimpleFin} className="flex-1 py-2 bg-accent text-white rounded">Sync</button>
+                   <button onClick={syncSimpleFin} className="flex-1 py-2 bg-accent text-white rounded">Sync Now</button>
                 </div>
              </div>
           </div>
        )}
-
-        {/* Rules Manager Modal */}
-        {showRulesModal && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-             <div className="bg-white p-6 rounded-xl w-[800px] h-[80vh] shadow-2xl flex flex-col">
-                <div className="flex justify-between items-center mb-4 border-b pb-2">
-                   <h3 className="font-bold text-lg flex items-center gap-2"><RobotIcon className="w-5 h-5" /> Auto-Categorization Rules</h3>
-                   <button onClick={() => setShowRulesModal(false)} className="text-gray-400 hover:text-gray-600">&times;</button>
-                </div>
-                
-                <div className="flex-1 overflow-y-auto flex gap-4">
-                   {/* Rule List */}
-                   <div className="w-1/3 border-r pr-4 space-y-2">
-                      <button onClick={() => setActiveRule({ name: 'New Rule', matchLogic: 'AND', conditions: [], isActive: true })} className="w-full py-2 border-2 border-dashed rounded text-sm text-gray-500 hover:bg-gray-50 mb-2">+ Create Rule</button>
-                      {rules.map(r => (
-                         <div key={r.id} onClick={() => setActiveRule(r)} className={`p-3 rounded border cursor-pointer text-sm ${activeRule?.id === r.id ? 'bg-blue-50 border-blue-300' : 'hover:bg-gray-50'}`}>
-                            <div className="font-bold truncate">{r.name}</div>
-                            <div className="text-xs text-gray-400">{r.conditions.length} conditions</div>
-                         </div>
-                      ))}
-                   </div>
-                   
-                   {/* Rule Editor */}
-                   <div className="flex-1 pl-2">
-                      {activeRule ? (
-                         <div className="space-y-4">
-                            <div>
-                               <label className="text-xs font-bold block mb-1">Rule Name</label>
-                               <input type="text" className="w-full border rounded px-2 py-1" value={activeRule.name || ''} onChange={e => setActiveRule({...activeRule, name: e.target.value})} />
-                            </div>
-                            
-                            <div>
-                               <label className="text-xs font-bold block mb-1">Match Logic</label>
-                               <div className="flex gap-4 text-sm">
-                                  <label className="flex items-center gap-1"><input type="radio" name="logic" checked={activeRule.matchLogic === 'AND'} onChange={() => setActiveRule({...activeRule, matchLogic: 'AND'})} /> All conditions (AND)</label>
-                                  <label className="flex items-center gap-1"><input type="radio" name="logic" checked={activeRule.matchLogic === 'OR'} onChange={() => setActiveRule({...activeRule, matchLogic: 'OR'})} /> Any condition (OR)</label>
-                                </div>
-                            </div>
-
-                            <div className="bg-gray-50 p-3 rounded border">
-                               <label className="text-xs font-bold block mb-2">Conditions</label>
-                               {activeRule.conditions?.map((c, i) => (
-                                  <div key={i} className="flex gap-2 mb-2 items-center">
-                                     <select className="text-xs border rounded p-1" value={c.field} onChange={e => {
-                                        const newConds = [...(activeRule.conditions||[])];
-                                        newConds[i] = { ...c, field: e.target.value as any };
-                                        setActiveRule({...activeRule, conditions: newConds});
-                                     }}>
-                                        <option value="description">Description</option>
-                                        <option value="amount">Amount</option>
-                                        <option value="account">Account</option>
-                                     </select>
-                                     <select className="text-xs border rounded p-1" value={c.operator} onChange={e => {
-                                        const newConds = [...(activeRule.conditions||[])];
-                                        newConds[i] = { ...c, operator: e.target.value as any };
-                                        setActiveRule({...activeRule, conditions: newConds});
-                                     }}>
-                                        <option value="contains">Contains</option>
-                                        <option value="equals">Equals</option>
-                                        <option value="starts_with">Starts With</option>
-                                        <option value="greater">Greater Than</option>
-                                        <option value="less">Less Than</option>
-                                     </select>
-                                     <input type="text" className="text-xs border rounded p-1 flex-1" value={c.value} onChange={e => {
-                                        const newConds = [...(activeRule.conditions||[])];
-                                        newConds[i] = { ...c, value: e.target.value };
-                                        setActiveRule({...activeRule, conditions: newConds});
-                                     }} />
-                                     <button onClick={() => {
-                                        const newConds = activeRule.conditions?.filter((_, idx) => idx !== i);
-                                        setActiveRule({...activeRule, conditions: newConds});
-                                     }} className="text-red-500 hover:text-red-700">&times;</button>
-                                  </div>
-                               ))}
-                               <button onClick={() => setActiveRule({...activeRule, conditions: [...(activeRule.conditions||[]), { id: Date.now().toString(), field: 'description', operator: 'contains', value: '' }]})} className="text-xs text-blue-600 hover:underline">+ Add Condition</button>
-                            </div>
-
-                            <div>
-                               <label className="text-xs font-bold block mb-1">Assign To Category</label>
-                               <select className="w-full border rounded px-2 py-1 text-sm" value={activeRule.targetCategoryId} onChange={e => setActiveRule({...activeRule, targetCategoryId: e.target.value})}>
-                                  {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                               </select>
-                            </div>
-
-                            <div className="pt-4 border-t flex justify-end gap-2">
-                               <button onClick={() => {
-                                  if (activeRule.id && rules.find(r => r.id === activeRule.id)) {
-                                     setRules(prev => prev.filter(r => r.id !== activeRule.id));
-                                     setActiveRule(null);
-                                  } else {
-                                     setActiveRule(null);
-                                  }
-                               }} className="text-red-500 text-sm px-3 py-1">Delete Rule</button>
-                               <button onClick={saveRule} className="bg-primary text-white text-sm px-4 py-1 rounded">Save Rule</button>
-                            </div>
-                         </div>
-                      ) : (
-                         <div className="h-full flex items-center justify-center text-gray-400">Select or create a rule</div>
-                      )}
-                   </div>
-                </div>
-             </div>
-          </div>
-       )}
-
     </div>
   );
 };
