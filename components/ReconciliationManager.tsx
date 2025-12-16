@@ -1,10 +1,8 @@
-
 import React, { useState, useRef } from 'react';
 import { Transaction, ReconciliationOrder, ReconciliationMatchSuggestion } from '../types';
 import { UploadIcon, CheckIcon, LinkIcon, FileIcon, CheckCircleIcon, XCircleIcon, BrainIcon } from './Icons';
 import { suggestReconciliationMatches } from '../services/geminiService';
-
-declare const XLSX: any;
+import * as XLSX from 'xlsx';
 
 interface ReconciliationManagerProps {
   transactions: Transaction[];

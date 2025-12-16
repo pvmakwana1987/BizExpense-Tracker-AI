@@ -3,8 +3,7 @@ import { Category, Transaction, TransactionType, AutoCategoryRule, RuleCondition
 import { UploadIcon, MagicWandIcon, TrashIcon, PlusCircleIcon, BankIcon, FileIcon, AlertIcon, GoogleSheetIcon, RobotIcon, CameraIcon, SparklesIcon, WarningIcon, ReceiptIcon, LinkIcon, CheckIcon, PlusIcon, PdfIcon } from './Icons';
 import { autoCategorizeTransactions, parseReceiptImage, normalizeMerchants, detectAnomalies, parsePdfStatement } from '../services/geminiService';
 import { fetchSimpleFinTransactions } from '../services/simpleFinService';
-
-declare const XLSX: any;
+import * as XLSX from 'xlsx';
 
 interface TransactionManagerProps {
   transactions: Transaction[];
